@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -13,6 +14,15 @@ import (
 	"github.com/momentohq/client-sdk-go/momento"
 	"github.com/momentohq/client-sdk-go/responses"
 )
+
+func AttachNewCachingMiddleware(cfg *aws.Config, cacheName string, client momento.CacheClient) {
+	cfg.APIOptions = append(cfg.APIOptions, func(stack *middleware.Stack) error {
+		return stack.Initialize.Add(
+			NewCachingMiddleware(cacheName, client),
+			middleware.Before,
+		)
+	})
+}
 
 func NewCachingMiddleware(cacheName string, momentoClient momento.CacheClient) middleware.InitializeMiddleware {
 	return middleware.InitializeMiddlewareFunc("CachingMiddleware", func(
