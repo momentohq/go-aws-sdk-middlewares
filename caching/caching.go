@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
@@ -27,9 +26,8 @@ func NewCachingMiddleware(cacheName string, momentoClient momento.CacheClient) m
 			// Derive cache key from DDB request
 			keys, err := normalizeKeys(*v.TableName, v.Key)
 			if err != nil {
-				log.Println("error getting normalized keys for caching skipping middleware" +
-					fmt.Sprintf("%+v", err))
-				return next.HandleInitialize(ctx, in)
+				log.Printf("error getting normalized keys for caching. skipping middleware %+v\n", err)
+				return next.HandleInitialize(ctx, in) // continue request execution skip middleware
 			}
 
 			// Make sure we don't cache when trying to do a consistent read
@@ -41,9 +39,8 @@ func NewCachingMiddleware(cacheName string, momentoClient momento.CacheClient) m
 					Key:       momento.String(keys),
 				})
 				if err != nil {
-					log.Println("error looking up item in cache skipping middleware" +
-						fmt.Sprintf("%+v", err))
-					return next.HandleInitialize(ctx, in)
+					log.Printf("error looking up item in cache skipping middleware %+v\n", err)
+					return next.HandleInitialize(ctx, in) // continue request execution skip middleware
 				}
 
 				switch r := rsp.(type) {
@@ -52,17 +49,15 @@ func NewCachingMiddleware(cacheName string, momentoClient momento.CacheClient) m
 					var t map[string]interface{}
 					err := json.NewDecoder(bytes.NewReader(r.ValueByte())).Decode(&t)
 					if err != nil {
-						fmt.Println("error decoding json item in cache to return item skipping middleware" +
-							fmt.Sprintf("%+v", err))
-						return next.HandleInitialize(ctx, in)
+						log.Printf("error decoding json item in cache to return skipping middleware %+v\n", err)
+						return next.HandleInitialize(ctx, in) // continue request execution skip middleware
 					}
 
 					// Marshal from attribute map to dynamodb.GetItemOutput.Item
 					marshalMap, err := attributevalue.MarshalMap(t)
 					if err != nil {
-						log.Println("error encoding item in cache to ddbItem to return skipping middleware" +
-							fmt.Sprintf("%+v", err))
-						return next.HandleInitialize(ctx, in)
+						log.Printf("error encoding item in cache to ddbItem to return skipping middleware %+v\n", err)
+						return next.HandleInitialize(ctx, in) // continue request execution skip middleware
 					}
 
 					// Return user spoofed dynamodb.GetItemOutput.Item w/ cached value
@@ -85,16 +80,14 @@ func NewCachingMiddleware(cacheName string, momentoClient momento.CacheClient) m
 				var t map[string]interface{}
 				err := attributevalue.UnmarshalMap(o.Item, &t)
 				if err != nil {
-					log.Println("error decoding output item to store in cache err=" +
-						fmt.Sprintf("%+v", err))
+					log.Printf("error decoding output item to store in cache err=%+v\n", err)
 					return out, md, nil // dont return err
 				}
 
 				// Marshal to JSON to store in cache
 				j, err := json.Marshal(t)
 				if err != nil {
-					log.Println("error json encoding new item to store in cache err=" +
-						fmt.Sprintf("%+v", err))
+					log.Printf("error json encoding new item to store in cache err=%+v\n", err)
 					return out, md, nil // dont return err
 				}
 
@@ -105,16 +98,14 @@ func NewCachingMiddleware(cacheName string, momentoClient momento.CacheClient) m
 					Value:     momento.Bytes(j),
 				})
 				if err != nil {
-					log.Println("error storing item in cache err=" +
-						fmt.Sprintf("%+v", err))
-
+					log.Printf("error storing item in cache err=%+v\n", err)
 					return out, md, nil // dont return err
 				}
 			}
 			// unsupported output just return output and dont do anything
 			return out, md, err
 		}
-		// CMD not supported just continue as normal
+		// AWS SDK CMD not supported just continue as normal
 		return next.HandleInitialize(ctx, in)
 	})
 }
