@@ -100,7 +100,7 @@ func (d *cachingMiddleWare) handleGetItemCommand(ctx context.Context, input *dyn
 
 		case *responses.GetMiss:
 			// Just log on miss
-			log.Printf("Look up did not find a value key=%s\n", keys)
+			log.Printf("Momento lookup did not find key=%s\n", keys)
 		}
 	}
 
