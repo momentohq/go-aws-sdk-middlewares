@@ -31,8 +31,10 @@ type Movie struct {
 }
 
 var (
-	tableName = "movies"
-	movie     = Movie{Title: "The Big New Movie", Year: 2015}
+	tableName       = "movies"
+	movie           = Movie{Title: "The Big New Movie", Year: 2015}
+	getRequestIndex = 0
+	setRequestIndex = 0
 )
 
 func (basics TableBasics) createTestTable() (*types.TableDescription, error) {
@@ -292,11 +294,27 @@ func TestGetItemError(t *testing.T) {
 }
 
 func TestBatchGetItemAllHits(t *testing.T) {
+	var (
+		expectedGetCalls = []momento.Key{
+			momento.String("2527188ede9e7888721b48523fdec8480a4728f954424b05cc50d515df57fa5d"),
+			momento.String("d30fb49db2b22c9c1140467424fd0401b4dc96c9925d75271db072e70090e60e"),
+		}
+	)
 	// Define Local Mocks used for test
 	mmc := &mockMomentoClient{
 		mockGetResponses: []responses.GetResponse{
-			&responses.GetHit{},
-			&responses.GetHit{},
+			responses.NewGetHit([]byte(
+				fmt.Sprintf(
+					`{"%s":"%s", "%s":%s}`,
+					"Title", "A Movie Part 1", "Year", "2021",
+				),
+			)),
+			responses.NewGetHit([]byte(
+				fmt.Sprintf(
+					`{"%s":"%s", "%s":%s}`,
+					"Title", "A Movie Part 2", "Year", "2021",
+				),
+			)),
 		},
 		mockSetResponses: []responses.SetResponse{},
 	}
@@ -308,19 +326,21 @@ func TestBatchGetItemAllHits(t *testing.T) {
 	tableInfo := TableBasics{DynamoDbClient: ddbClient, TableName: tableName}
 	_, err := tableInfo.createTestTable()
 	if err != nil {
-		panic(err)
+		t.Errorf("error creating table: %+v", err)
 	}
 	for i := 0; i < 20; i++ {
 		err = tableInfo.addMovie(Movie{
 			Title: "A Movie Part " + fmt.Sprint(i),
 			Year:  2021,
+			Info: map[string]interface{}{
+				"plot": "Nothing happens at all.",
+			},
 		})
 		if err != nil {
-			panic(err)
+			t.Errorf("error adding data: %+v", err)
 		}
 	}
 
-	//bareDdbClient := dynamodb.NewFromConfig(mustGetAWSConfig())
 	myMovie1 := Movie{
 		Title: "A Movie Part 1",
 		Year:  2021,
@@ -341,20 +361,33 @@ func TestBatchGetItemAllHits(t *testing.T) {
 	}
 	response, err := ddbClient.BatchGetItem(context.TODO(), req)
 	if err != nil {
-		log.Printf("Couldn't get info about movie. Here's why: %v\n", err)
-	} else {
-		fmt.Printf("Response: %+v\n", response)
-		for _, item := range response.Responses[tableName] {
-			var movie Movie
-			err = attributevalue.UnmarshalMap(item, &movie)
-			if err != nil {
-				log.Printf("Couldn't unmarshal response. Here's why: %v\n", err)
-			}
-			fmt.Printf("Movie: %+v\n", movie)
-		}
+		t.Errorf("error occurred calling batch get item: %+v\n", err)
+	}
+
+	printResponse(response)
+
+	if !reflect.DeepEqual(mmc.getCalls, expectedGetCalls) {
+		t.Errorf("get not called on momento client with expected keys %+v", mmc.getCalls)
+	}
+
+	if len(mmc.setCalls) > 0 {
+		t.Errorf("set should not be called on cache hit %+v", mmc.setCalls)
 	}
 
 	tableInfo.deleteTable()
+}
+
+// use to inspect dynamo batchGetItem response
+func printResponse(response *dynamodb.BatchGetItemOutput) {
+	fmt.Printf("DDB Response: %+v\n", response)
+	for _, item := range response.Responses[tableName] {
+		var movie Movie
+		err := attributevalue.UnmarshalMap(item, &movie)
+		if err != nil {
+			panic(fmt.Sprintf("Couldn't unmarshal response. Here's why: %v\n", err))
+		}
+		fmt.Printf("Movie: %+v\n", movie)
+	}
 }
 
 // Test Utils ----------------
@@ -371,22 +404,29 @@ type mockMomentoClient struct {
 	getCalls []momento.Key
 	setCalls []kvPair
 }
+
 type kvPair struct {
 	key   momento.Key
 	value momento.Bytes
 }
 
 func (c *mockMomentoClient) Get(ctx context.Context, r *momento.GetRequest) (responses.GetResponse, error) {
+	//fmt.Printf("======== GET key: %s\n", r.Key)
 	c.getCalls = append(c.getCalls, r.Key)
 	if c.getError != nil {
 		return nil, c.getError
 	}
-	return c.mockGetResponses[0], nil
+	rsp := c.mockGetResponses[getRequestIndex]
+	getRequestIndex++
+	return rsp, nil
 }
 
 func (c *mockMomentoClient) Set(ctx context.Context, r *momento.SetRequest) (responses.SetResponse, error) {
+	//fmt.Printf("======== SET key: %s\n", r.Key)
 	c.setCalls = append(c.setCalls, kvPair{r.Key, r.Value.(momento.Bytes)})
-	return c.mockSetResponses[0], nil
+	rsp := c.mockSetResponses[0]
+	setRequestIndex++
+	return rsp, nil
 }
 
 func mustGetAWSConfig() aws.Config {
