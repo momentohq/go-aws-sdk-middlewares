@@ -65,6 +65,27 @@ func NewCachingMiddleware(mw *cachingMiddleware) middleware.InitializeMiddleware
 }
 
 func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input *dynamodb.BatchGetItemInput, in middleware.InitializeInput, next middleware.InitializeHandler) (middleware.InitializeOutput, error) {
+	fmt.Printf("input: %+v\n", input)
+	for tableName, keys := range input.RequestItems {
+		fmt.Printf("tableName: %s keys: %+v\n", tableName, keys)
+		for _, key := range keys.Keys {
+			fmt.Printf("key: %+v\n", key)
+			// unmarshal raw response object to DDB attribute values map
+			var t map[string]interface{}
+			err := attributevalue.UnmarshalMap(key, &t)
+			if err != nil {
+				log.Printf("error decoding output item to store in cache err=%+v\n", err)
+				return middleware.InitializeOutput{}, nil // dont return err
+			}
+			fmt.Printf("t: %+v\n", t)
+			cacheKey, err := ComputeCacheKey(tableName, key)
+			if err != nil {
+				panic(err)
+			}
+			fmt.Printf("cache key: %s\n", cacheKey)
+		}
+	}
+
 	return middleware.InitializeOutput{}, errors.New("not implemented")
 }
 
@@ -74,9 +95,9 @@ func (d *cachingMiddleware) handleGetItemCommand(ctx context.Context, input *dyn
 	if input.TableName == nil {
 		return middleware.InitializeOutput{}, errors.New("error table name not set on get-item request")
 	}
-	keys, err := normalizeKeys(*input.TableName, input.Key)
+	cacheKey, err := ComputeCacheKey(*input.TableName, input.Key)
 	if err != nil {
-		return middleware.InitializeOutput{}, fmt.Errorf("error getting normalized keys for caching: %w", err)
+		return middleware.InitializeOutput{}, fmt.Errorf("error getting key for caching: %w", err)
 	}
 
 	// Make sure we don't cache when trying to do a consistent read
@@ -84,7 +105,7 @@ func (d *cachingMiddleware) handleGetItemCommand(ctx context.Context, input *dyn
 		// Try to look up value in momento
 		rsp, err := d.momentoClient.Get(ctx, &momento.GetRequest{
 			CacheName: d.cacheName,
-			Key:       momento.String(keys),
+			Key:       momento.String(cacheKey),
 		})
 		if err != nil {
 			return middleware.InitializeOutput{}, fmt.Errorf("error looking up item in cache: %w", err)
@@ -92,6 +113,7 @@ func (d *cachingMiddleware) handleGetItemCommand(ctx context.Context, input *dyn
 
 		switch r := rsp.(type) {
 		case *responses.GetHit:
+			// TODO: pull this into a "marshal" function
 			// On hit decode value from stored json to DDB attribute map
 			var t map[string]interface{}
 			err := json.NewDecoder(bytes.NewReader(r.ValueByte())).Decode(&t)
@@ -112,7 +134,7 @@ func (d *cachingMiddleware) handleGetItemCommand(ctx context.Context, input *dyn
 
 		case *responses.GetMiss:
 			// Just log on miss
-			log.Printf("Momento lookup did not find key=%s\n", keys)
+			log.Printf("Momento lookup did not find key=%s\n", cacheKey)
 		}
 	}
 
@@ -122,6 +144,8 @@ func (d *cachingMiddleware) handleGetItemCommand(ctx context.Context, input *dyn
 	if err == nil {
 		switch o := out.Result.(type) {
 		case *dynamodb.GetItemOutput:
+
+			// TODO: Pull out all code before the `set` into an `unmarshal()` function
 			// unmarshal raw response object to DDB attribute values map
 			var t map[string]interface{}
 			err := attributevalue.UnmarshalMap(o.Item, &t)
@@ -140,7 +164,7 @@ func (d *cachingMiddleware) handleGetItemCommand(ctx context.Context, input *dyn
 			// set item in momento cache
 			_, err = d.momentoClient.Set(ctx, &momento.SetRequest{
 				CacheName: d.cacheName,
-				Key:       momento.String(keys),
+				Key:       momento.String(cacheKey),
 				Value:     momento.Bytes(j),
 			})
 			if err != nil {
@@ -154,7 +178,8 @@ func (d *cachingMiddleware) handleGetItemCommand(ctx context.Context, input *dyn
 	return out, err
 }
 
-func normalizeKeys(tableName string, keys map[string]types.AttributeValue) (string, error) {
+// TODO: pull out to a helper package - rename to something better
+func ComputeCacheKey(tableName string, keys map[string]types.AttributeValue) (string, error) {
 	// Marshal to attribute map
 	var t map[string]interface{}
 	err := attributevalue.UnmarshalMap(keys, &t)

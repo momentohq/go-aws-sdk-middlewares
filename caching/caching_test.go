@@ -116,7 +116,6 @@ func (basics TableBasics) getMovie(title string, year int) (Movie, error) {
 
 func populateDdbLocal() TableBasics {
 	config := mustGetAWSConfig()
-
 	ddbClient := dynamodb.NewFromConfig(config)
 	tableInfo := TableBasics{DynamoDbClient: ddbClient, TableName: tableName}
 	_, err := tableInfo.createTestTable()
@@ -293,7 +292,69 @@ func TestGetItemError(t *testing.T) {
 }
 
 func TestBatchGetItemAllHits(t *testing.T) {
+	// Define Local Mocks used for test
+	mmc := &mockMomentoClient{
+		mockGetResponses: []responses.GetResponse{
+			&responses.GetHit{},
+			&responses.GetHit{},
+		},
+		mockSetResponses: []responses.SetResponse{},
+	}
 
+	config := mustGetAWSConfig()
+	// Attach Momento Caching Middleware
+	AttachNewCachingMiddleware(&config, tableName, mmc)
+	ddbClient := dynamodb.NewFromConfig(config)
+	tableInfo := TableBasics{DynamoDbClient: ddbClient, TableName: tableName}
+	_, err := tableInfo.createTestTable()
+	if err != nil {
+		panic(err)
+	}
+	for i := 0; i < 20; i++ {
+		err = tableInfo.addMovie(Movie{
+			Title: "A Movie Part " + fmt.Sprint(i),
+			Year:  2021,
+		})
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	//bareDdbClient := dynamodb.NewFromConfig(mustGetAWSConfig())
+	myMovie1 := Movie{
+		Title: "A Movie Part 1",
+		Year:  2021,
+	}
+	myMovie2 := Movie{
+		Title: "A Movie Part 2",
+		Year:  2021,
+	}
+	req := &dynamodb.BatchGetItemInput{
+		RequestItems: map[string]types.KeysAndAttributes{
+			tableName: {
+				Keys: []map[string]types.AttributeValue{
+					myMovie1.getKey(),
+					myMovie2.getKey(),
+				},
+			},
+		},
+	}
+	response, err := ddbClient.BatchGetItem(context.TODO(), req)
+	if err != nil {
+		log.Printf("Couldn't get info about movie. Here's why: %v\n", err)
+	} else {
+		fmt.Printf("Response: %+v\n", response)
+		for _, item := range response.Responses[tableName] {
+			var movie Movie
+			err = attributevalue.UnmarshalMap(item, &movie)
+			if err != nil {
+				log.Printf("Couldn't unmarshal response. Here's why: %v\n", err)
+			}
+			fmt.Printf("Movie: %+v\n", movie)
+		}
+	}
+
+	tableInfo.deleteTable()
 }
 
 // Test Utils ----------------
