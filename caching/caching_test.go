@@ -125,17 +125,7 @@ func populateDdbLocal() TableBasics {
 	}
 
 	// Add a movie to the table
-	movie := Movie{
-		Title: "The Big New Movie",
-		Year:  2015,
-	}
 	err = tableInfo.addMovie(movie)
-	if err != nil {
-		panic(err)
-	}
-
-	// Get the movie from the table
-	movie, err = tableInfo.getMovie("The Big New Movie", 2015)
 	if err != nil {
 		panic(err)
 	}

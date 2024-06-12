@@ -50,10 +50,22 @@ func NewCachingMiddleware(mw *cachingMiddleware) middleware.InitializeMiddleware
 			}
 			// Middleware ran successfully return our cached output
 			return o, middleware.Metadata{}, nil
+		case *dynamodb.BatchGetItemInput:
+			o, err := mw.handleBatchGetItemCommand(ctx, v, in, next)
+			if err != nil {
+				log.Printf("error occurred trying to use caching middleware. skipping middleware %+v\n", err)
+				return next.HandleInitialize(ctx, in) // continue request execution skip middleware
+			}
+			// Middleware ran successfully return our cached output
+			return o, middleware.Metadata{}, nil
 		}
 		// AWS SDK CMD not supported just continue as normal
 		return next.HandleInitialize(ctx, in)
 	})
+}
+
+func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input *dynamodb.BatchGetItemInput, in middleware.InitializeInput, next middleware.InitializeHandler) (middleware.InitializeOutput, error) {
+	return middleware.InitializeOutput{}, errors.New("not implemented")
 }
 
 func (d *cachingMiddleware) handleGetItemCommand(ctx context.Context, input *dynamodb.GetItemInput, in middleware.InitializeInput, next middleware.InitializeHandler) (middleware.InitializeOutput, error) {
