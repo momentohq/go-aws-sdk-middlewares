@@ -19,7 +19,7 @@ import (
 	"github.com/momentohq/client-sdk-go/responses"
 )
 
-type cachingMiddleWare struct {
+type cachingMiddleware struct {
 	cacheName     string
 	momentoClient momento.CacheClient
 }
@@ -27,7 +27,7 @@ type cachingMiddleWare struct {
 func AttachNewCachingMiddleware(cfg *aws.Config, cacheName string, client momento.CacheClient) {
 	cfg.APIOptions = append(cfg.APIOptions, func(stack *middleware.Stack) error {
 		return stack.Initialize.Add(
-			NewCachingMiddleware(&cachingMiddleWare{
+			NewCachingMiddleware(&cachingMiddleware{
 				cacheName:     cacheName,
 				momentoClient: client,
 			}),
@@ -36,7 +36,7 @@ func AttachNewCachingMiddleware(cfg *aws.Config, cacheName string, client moment
 	})
 }
 
-func NewCachingMiddleware(mw *cachingMiddleWare) middleware.InitializeMiddleware {
+func NewCachingMiddleware(mw *cachingMiddleware) middleware.InitializeMiddleware {
 	return middleware.InitializeMiddlewareFunc("CachingMiddleware", func(
 		ctx context.Context, in middleware.InitializeInput, next middleware.InitializeHandler,
 	) (out middleware.InitializeOutput, metadata middleware.Metadata, err error) {
@@ -56,7 +56,7 @@ func NewCachingMiddleware(mw *cachingMiddleWare) middleware.InitializeMiddleware
 	})
 }
 
-func (d *cachingMiddleWare) handleGetItemCommand(ctx context.Context, input *dynamodb.GetItemInput, in middleware.InitializeInput, next middleware.InitializeHandler) (middleware.InitializeOutput, error) {
+func (d *cachingMiddleware) handleGetItemCommand(ctx context.Context, input *dynamodb.GetItemInput, in middleware.InitializeInput, next middleware.InitializeHandler) (middleware.InitializeOutput, error) {
 
 	// Derive a cache key from DDB request
 	if input.TableName == nil {

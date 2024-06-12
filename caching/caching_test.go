@@ -2,6 +2,7 @@ package caching
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"log"
@@ -31,6 +32,7 @@ type Movie struct {
 
 var (
 	tableName = "movies"
+	movie     = Movie{Title: "The Big New Movie", Year: 2015}
 )
 
 func (basics TableBasics) createTestTable() (*types.TableDescription, error) {
@@ -148,7 +150,6 @@ func (basics TableBasics) deleteTable() {
 	if err != nil {
 		log.Printf("Couldn't delete table %v. Here's why: %v\n", basics.TableName, err)
 	}
-	fmt.Println("Table deleted")
 }
 
 func TestLocalDdb(t *testing.T) {
@@ -158,8 +159,6 @@ func TestLocalDdb(t *testing.T) {
 
 func TestGetItemCacheMiss(t *testing.T) {
 	var (
-		movie                  = Movie{Title: "The Big New Movie", Year: 2015}
-		tableName              = tableName
 		expectedKeyHashValue   = "ba805c7ef6e7aa579a8fd513ee73445e8d7a33d05fbf07c25a0a2d9d9a933a68"
 		mockMomentoGetResponse = &responses.GetMiss{}
 		expectedGetGalls       = []momento.Key{
@@ -207,131 +206,105 @@ func TestGetItemCacheMiss(t *testing.T) {
 		t.Errorf("set not called on momento client with expected keys %+v", mmc.setCalls)
 	}
 
-	// delete the table
 	tableInfo.deleteTable()
 }
 
-//func TestGetItemHit(t *testing.T) {
-//	var (
-//		// !Important: Use consistent values so hash is consistent. No UUID's.
-//		keyName                = "testHitKeyName"
-//		keyValue               = "testHitValue"
-//		tableName              = "testHitTableName"
-//		expectedKeyHashValue   = "71cbb67599c35874ed2df78ab827698f9fdefce387a013790e43d8d33ac2a693"
-//		mockMomentoGetResponse = responses.NewGetHit([]byte(fmt.Sprintf(`{"%s":"%s"}`, keyName, keyValue)))
-//		expectedGetGalls       = []momento.Key{
-//			momento.String(expectedKeyHashValue),
-//		}
-//	)
-//
-//	ddbLocal := &mockDDBLocal{
-//		mockGetItemResponses: []string{},
-//	}
-//	ddbLocal.start()
-//	mmc := &mockMomentoClient{
-//		mockGetResponses: []responses.GetResponse{
-//			mockMomentoGetResponse,
-//		},
-//		mockSetResponses: []responses.SetResponse{},
-//	}
-//	aConfig := mustGetAWSConfig()
-//
-//	// Attach Momento Caching Middleware
-//	AttachNewCachingMiddleware(&aConfig, tableName, mmc)
-//
-//	// Create a DDB client
-//	ddbClient := dynamodb.NewFromConfig(aConfig)
-//
-//	// Execute GetItem Request as you would normally
-//	_, err := ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
-//		TableName: aws.String(tableName),
-//		Key: map[string]types.AttributeValue{
-//			keyName: &types.AttributeValueMemberS{
-//				Value: keyValue,
-//			},
-//		},
-//	})
-//	if err != nil {
-//		t.Errorf("error occured calling get item: %+v", err)
-//	}
-//
-//	if !reflect.DeepEqual(mmc.getCalls, expectedGetGalls) {
-//		t.Errorf("get not called on momento client with expected keys %+v", mmc.getCalls)
-//	}
-//
-//	if len(mmc.setCalls) > 0 {
-//		t.Errorf("set should not be called on cache hit %+v", mmc.setCalls)
-//	}
-//	if ddbLocal.getItemCallCount > 0 {
-//		t.Errorf("DDB should not be called on cache hit callCount=%d", ddbLocal.getItemCallCount)
-//	}
-//}
-//
-//func TestGetItemError(t *testing.T) {
-//	var (
-//		// !Important: Use consistent values so hash is consistent. No UUID's.
-//		keyName                = "testErrorKeyName"
-//		keyValue               = "testErrorValue"
-//		tableName              = "testErrorTableName"
-//		expectedKeyHashValue   = "bce4a132c65e9deb295ea904c64ed2059dd7e369025e15940fe358d0fd818c33"
-//		mockDDBResponse        = fmt.Sprintf(`{"Item": {"%s": { "S": "%s" }}}`, keyName, keyValue)
-//		mockMomentoGetResponse = responses.GetMiss{}
-//		getError               = momento.NewMomentoError(
-//			"error-code",
-//			"error-message",
-//			errors.New("original error"),
-//		)
-//		expectedGetGalls = []momento.Key{
-//			momento.String(expectedKeyHashValue),
-//		}
-//		expectedSetCalls []kvPair // we bail on any error currently just let DDB call go as normal
-//	)
-//
-//	ddbLocal := &mockDDBLocal{
-//		mockGetItemResponses: []string{mockDDBResponse},
-//	}
-//	ddbLocal.start()
-//	mmc := &mockMomentoClient{
-//		mockGetResponses: []responses.GetResponse{
-//			mockMomentoGetResponse,
-//		},
-//		getError: getError,
-//		mockSetResponses: []responses.SetResponse{
-//			responses.SetSuccess{},
-//		},
-//	}
-//	aConfig := mustGetAWSConfig()
-//
-//	// Attach Momento Caching Middleware
-//	AttachNewCachingMiddleware(&aConfig, tableName, mmc)
-//
-//	// Create a DDB client
-//	ddbClient := dynamodb.NewFromConfig(aConfig)
-//
-//	// Execute GetItem Request as you would normally
-//	_, err := ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
-//		TableName: aws.String(tableName),
-//		Key: map[string]types.AttributeValue{
-//			keyName: &types.AttributeValueMemberS{
-//				Value: keyValue,
-//			},
-//		},
-//	})
-//	if err != nil {
-//		t.Errorf("error occured calling get item: %+v", err)
-//	}
-//
-//	if !reflect.DeepEqual(mmc.getCalls, expectedGetGalls) {
-//		t.Errorf("get not called on momento client with expected keys %+v", mmc.getCalls)
-//	}
-//
-//	if !reflect.DeepEqual(mmc.setCalls, expectedSetCalls) {
-//		t.Errorf("set not called on momento client with expected keys %+v", mmc.setCalls)
-//	}
-//	if ddbLocal.getItemCallCount != 1 {
-//		t.Errorf("DDB should be called on cache error callCount=%d", ddbLocal.getItemCallCount)
-//	}
-//}
+func TestGetItemHit(t *testing.T) {
+	var (
+		expectedKeyHashValue   = "ba805c7ef6e7aa579a8fd513ee73445e8d7a33d05fbf07c25a0a2d9d9a933a68"
+		mockMomentoGetResponse = responses.NewGetHit([]byte(fmt.Sprintf(`{"%s":"%s"}`, "foo", "bar")))
+		expectedGetCalls       = []momento.Key{
+			momento.String(expectedKeyHashValue),
+		}
+	)
+
+	mmc := &mockMomentoClient{
+		mockGetResponses: []responses.GetResponse{
+			mockMomentoGetResponse,
+		},
+		mockSetResponses: []responses.SetResponse{},
+	}
+	aConfig := mustGetAWSConfig()
+
+	// Attach Momento Caching Middleware
+	AttachNewCachingMiddleware(&aConfig, tableName, mmc)
+
+	// Create a DDB client
+	ddbClient := dynamodb.NewFromConfig(aConfig)
+
+	// Execute GetItem Request as you would normally
+	_, err := ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
+		TableName: aws.String(tableName),
+		Key:       movie.getKey(),
+	})
+	if err != nil {
+		t.Errorf("error occured calling get item: %+v", err)
+	}
+
+	if !reflect.DeepEqual(mmc.getCalls, expectedGetCalls) {
+		t.Errorf("get not called on momento client with expected keys %+v", mmc.getCalls)
+	}
+
+	if len(mmc.setCalls) > 0 {
+		t.Errorf("set should not be called on cache hit %+v", mmc.setCalls)
+	}
+}
+
+func TestGetItemError(t *testing.T) {
+	var (
+		expectedKeyHashValue   = "ba805c7ef6e7aa579a8fd513ee73445e8d7a33d05fbf07c25a0a2d9d9a933a68"
+		mockMomentoGetResponse = responses.GetMiss{}
+		getError               = momento.NewMomentoError(
+			"error-code",
+			"error-message",
+			errors.New("original error"),
+		)
+		expectedGetGalls = []momento.Key{
+			momento.String(expectedKeyHashValue),
+		}
+		expectedSetCalls []kvPair // we bail on any error currently just let DDB call go as normal
+	)
+
+	tableInfo := populateDdbLocal()
+	mmc := &mockMomentoClient{
+		mockGetResponses: []responses.GetResponse{
+			mockMomentoGetResponse,
+		},
+		getError: getError,
+		mockSetResponses: []responses.SetResponse{
+			responses.SetSuccess{},
+		},
+	}
+	aConfig := mustGetAWSConfig()
+
+	// Attach Momento Caching Middleware
+	AttachNewCachingMiddleware(&aConfig, tableName, mmc)
+
+	// Create a DDB client
+	ddbClient := dynamodb.NewFromConfig(aConfig)
+
+	// Execute GetItem Request as you would normally
+	_, err := ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
+		TableName: aws.String(tableName),
+		Key:       movie.getKey(),
+	})
+	if err != nil {
+		t.Errorf("error occured calling get item: %+v", err)
+	}
+
+	if !reflect.DeepEqual(mmc.getCalls, expectedGetGalls) {
+		t.Errorf("get not called on momento client with expected keys %+v", mmc.getCalls)
+	}
+
+	if !reflect.DeepEqual(mmc.setCalls, expectedSetCalls) {
+		t.Errorf("set not called on momento client with expected keys %+v", mmc.setCalls)
+	}
+	tableInfo.deleteTable()
+}
+
+func TestBatchGetItemAllHits(t *testing.T) {
+
+}
 
 // Test Utils ----------------
 
