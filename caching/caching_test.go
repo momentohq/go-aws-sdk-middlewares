@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"log"
 	"reflect"
 	"testing"
@@ -13,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsConfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/momentohq/client-sdk-go/momento"
@@ -471,6 +471,178 @@ func TestBatchGetItemAllMisses(t *testing.T) {
 		t.Errorf("set not called on momento client with expected keys %+v", mmc.setCalls)
 	}
 
+	tableInfo.deleteTable()
+}
+
+func TestBatchGetItemsMixed(t *testing.T) {
+	defer setupTest()()
+	var (
+		expectedGetCalls = []momento.Key{
+			momento.String("2527188ede9e7888721b48523fdec8480a4728f954424b05cc50d515df57fa5d"),
+			momento.String("d30fb49db2b22c9c1140467424fd0401b4dc96c9925d75271db072e70090e60e"),
+		}
+		expectedSetCalls = []kvPair{
+			{
+				momento.String("2527188ede9e7888721b48523fdec8480a4728f954424b05cc50d515df57fa5d"),
+				momento.Bytes("{\"info\":null,\"title\":\"A Movie Part 1\",\"year\":2021}"),
+			},
+			{
+				momento.String("d30fb49db2b22c9c1140467424fd0401b4dc96c9925d75271db072e70090e60e"),
+				momento.Bytes("{\"info\":null,\"title\":\"A Movie Part 2\",\"year\":2021}"),
+			},
+		}
+	)
+
+	mmc := &mockMomentoClient{
+		mockGetResponses: []responses.GetResponse{
+			responses.NewGetHit([]byte(
+				fmt.Sprintf(
+					`{"%s":"%s", "%s":%s}`,
+					"Title", "A Movie Part 1", "Year", "2021",
+				),
+			)),
+			&responses.GetMiss{},
+		},
+		mockSetResponses: []responses.SetResponse{
+			&responses.SetSuccess{},
+			&responses.SetSuccess{},
+		},
+	}
+
+	config := mustGetAWSConfig()
+	// Attach Momento Caching Middleware
+	AttachNewCachingMiddleware(&config, tableName, mmc)
+	ddbClient := dynamodb.NewFromConfig(config)
+
+	tableInfo := TableBasics{DynamoDbClient: ddbClient, TableName: tableName}
+	_, err := tableInfo.createTestTable()
+	if err != nil {
+		t.Errorf("error creating table: %+v", err)
+	}
+	for i := 0; i < 20; i++ {
+		err = tableInfo.addMovie(Movie{
+			Title: "A Movie Part " + fmt.Sprint(i),
+			Year:  2021,
+		})
+		if err != nil {
+			t.Errorf("error adding data: %+v", err)
+		}
+	}
+
+	myMovie1 := Movie{
+		Title: "A Movie Part 1",
+		Year:  2021,
+	}
+	myMovie2 := Movie{
+		Title: "A Movie Part 2",
+		Year:  2021,
+	}
+	req := &dynamodb.BatchGetItemInput{
+		RequestItems: map[string]types.KeysAndAttributes{
+			tableName: {
+				Keys: []map[string]types.AttributeValue{
+					myMovie1.getKey(),
+					myMovie2.getKey(),
+				},
+			},
+		},
+	}
+	response, err := ddbClient.BatchGetItem(context.TODO(), req)
+	if err != nil {
+		t.Errorf("error occurred calling batch get item: %+v\n", err)
+	}
+
+	fmt.Printf("DDB Response: %+v\n", response)
+
+	if !reflect.DeepEqual(mmc.getCalls, expectedGetCalls) {
+		t.Errorf("get not called on momento client with expected keys %+v", mmc.getCalls)
+	}
+
+	if !reflect.DeepEqual(mmc.setCalls, expectedSetCalls) {
+		t.Errorf("set not called on momento client with expected keys %+v", mmc.setCalls)
+	}
+
+	tableInfo.deleteTable()
+}
+
+func TestBatchGetItemsError(t *testing.T) {
+	defer setupTest()()
+	var (
+		expectedKeyHashValue   = "2527188ede9e7888721b48523fdec8480a4728f954424b05cc50d515df57fa5d"
+		mockMomentoGetResponse = responses.GetMiss{}
+		getError               = momento.NewMomentoError(
+			"error-code",
+			"error-message",
+			errors.New("original error"),
+		)
+		expectedGetGalls = []momento.Key{
+			momento.String(expectedKeyHashValue),
+		}
+		expectedSetCalls []kvPair // we bail on any error currently just let DDB call go as normal
+	)
+
+	mmc := &mockMomentoClient{
+		mockGetResponses: []responses.GetResponse{
+			mockMomentoGetResponse,
+		},
+		getError: getError,
+		mockSetResponses: []responses.SetResponse{
+			responses.SetSuccess{},
+			responses.SetSuccess{},
+		},
+	}
+	aConfig := mustGetAWSConfig()
+	// Attach Momento Caching Middleware
+	AttachNewCachingMiddleware(&aConfig, tableName, mmc)
+	// Create a DDB client
+	ddbClient := dynamodb.NewFromConfig(aConfig)
+	tableInfo := TableBasics{DynamoDbClient: ddbClient, TableName: tableName}
+	_, err := tableInfo.createTestTable()
+	if err != nil {
+		t.Errorf("error creating table: %+v", err)
+	}
+	for i := 0; i < 20; i++ {
+		err = tableInfo.addMovie(Movie{
+			Title: "A Movie Part " + fmt.Sprint(i),
+			Year:  2021,
+		})
+		if err != nil {
+			t.Errorf("error adding data: %+v", err)
+		}
+	}
+
+	myMovie1 := Movie{
+		Title: "A Movie Part 1",
+		Year:  2021,
+	}
+	myMovie2 := Movie{
+		Title: "A Movie Part 2",
+		Year:  2021,
+	}
+	req := &dynamodb.BatchGetItemInput{
+		RequestItems: map[string]types.KeysAndAttributes{
+			tableName: {
+				Keys: []map[string]types.AttributeValue{
+					myMovie1.getKey(),
+					myMovie2.getKey(),
+				},
+			},
+		},
+	}
+
+	resp, err := ddbClient.BatchGetItem(context.TODO(), req)
+	if err != nil {
+		t.Errorf("error occured calling get item: %+v", err)
+	}
+	fmt.Printf("DDB Response: %+v\n", resp)
+
+	if !reflect.DeepEqual(mmc.getCalls, expectedGetGalls) {
+		t.Errorf("get not called on momento client with expected keys %+v", mmc.getCalls)
+	}
+
+	if !reflect.DeepEqual(mmc.setCalls, expectedSetCalls) {
+		t.Errorf("set not called on momento client with expected keys %+v", mmc.setCalls)
+	}
 	tableInfo.deleteTable()
 }
 
