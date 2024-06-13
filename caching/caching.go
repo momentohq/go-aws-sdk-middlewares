@@ -67,18 +67,32 @@ func NewCachingMiddleware(mw *cachingMiddleware) middleware.InitializeMiddleware
 func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input *dynamodb.BatchGetItemInput, in middleware.InitializeInput, next middleware.InitializeHandler) (middleware.InitializeOutput, error) {
 
 	responsesToReturn := make(map[string][]map[string]types.AttributeValue)
+	// for now any cache miss is considered a miss for the whole batch
 	gotMiss := false
+	// this holds the keys for each DDB table in the request and is used to compute the cache key for
+	// cache set operations
+	tableToKeys := make(map[string][]string)
 
-	// Loop through all tables and keys in the request
 	for tableName, keys := range input.RequestItems {
+		gatherKeys := false
+		if tableToKeys[tableName] == nil {
+			tableToKeys[tableName] = []string{}
+			gatherKeys = true
+		}
+		fmt.Printf("keys: %v\n", keys.Keys)
 		if responsesToReturn[tableName] == nil {
 			responsesToReturn[tableName] = []map[string]types.AttributeValue{}
 		}
 		for _, key := range keys.Keys {
+			if gatherKeys {
+				for keyName := range key {
+					tableToKeys[tableName] = append(tableToKeys[tableName], keyName)
+				}
+				gatherKeys = false
+			}
+			fmt.Printf("table2Keys: %v\n", tableToKeys[tableName])
 			fmt.Printf("computing GET key from table: %s and key: %v\n", tableName, key)
 			cacheKey, err := ComputeCacheKey(tableName, key)
-			// TODO: do we really want to do this? This means users can never access data if our service is down.
-			//  Seems like we should just consider this a miss and move on.
 			if err != nil {
 				return middleware.InitializeOutput{}, fmt.Errorf("error getting key for caching: %w", err)
 			}
@@ -87,7 +101,6 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 				CacheName: d.cacheName,
 				Key:       momento.String(cacheKey),
 			})
-			// TODO: Same question as above. This should probably just be a miss?
 			if err != nil {
 				return middleware.InitializeOutput{}, fmt.Errorf("error looking up item in cache: %w", err)
 			}
@@ -96,10 +109,11 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 			case *responses.GetHit:
 				marshalMap, err := GetMarshalMap(r)
 				if err != nil {
-					return middleware.InitializeOutput{}, fmt.Errorf("error with martial map: %w", err)
+					return middleware.InitializeOutput{}, fmt.Errorf("error with marshal map: %w", err)
 				}
 				responsesToReturn[tableName] = append(responsesToReturn[tableName], marshalMap)
 			case *responses.GetMiss:
+				// TODO: for now we're considering any miss a miss for the whole batch
 				gotMiss = true
 				fmt.Println("miss")
 			default:
@@ -135,9 +149,14 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 						return out, err // don't return error
 					}
 
-					fmt.Printf("computing SET key from table: %s and key: %v\n", tableName, item)
+					// extract the keys from the item to compute the hash key
+					itemForKey := map[string]types.AttributeValue{}
+					for _, key := range tableToKeys[tableName] {
+						itemForKey[key] = item[key]
+						fmt.Printf("key: %v\n", key)
+					}
 
-					cacheKey, err := ComputeCacheKey(tableName, item)
+					cacheKey, err := ComputeCacheKey(tableName, itemForKey)
 					// set item in momento cache
 					_, err = d.momentoClient.Set(ctx, &momento.SetRequest{
 						CacheName: d.cacheName,
@@ -175,8 +194,6 @@ func (d *cachingMiddleware) handleGetItemCommand(ctx context.Context, input *dyn
 			CacheName: d.cacheName,
 			Key:       momento.String(cacheKey),
 		})
-		// TODO: do we really want to do this? This means users can never access data if our service is down.
-		//  Seems like we should just consider this a miss and move on.
 		if err != nil {
 			return middleware.InitializeOutput{}, fmt.Errorf("error looking up item in cache: %w", err)
 		}

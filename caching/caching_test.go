@@ -397,11 +397,11 @@ func TestBatchGetItemAllMisses(t *testing.T) {
 		}
 		expectedSetCalls = []kvPair{
 			{
-				momento.String("5c32eec327933e34b8f460aef288f1e1f68335c0afad263240ec547dfbbe72ff"),
+				momento.String("2527188ede9e7888721b48523fdec8480a4728f954424b05cc50d515df57fa5d"),
 				momento.Bytes("{\"info\":null,\"title\":\"A Movie Part 1\",\"year\":2021}"),
 			},
 			{
-				momento.String("cca4b1d4b80bccd7eee64d52baa4afe161b388c47808fcb1f0fa5c17c0bb8517"),
+				momento.String("d30fb49db2b22c9c1140467424fd0401b4dc96c9925d75271db072e70090e60e"),
 				momento.Bytes("{\"info\":null,\"title\":\"A Movie Part 2\",\"year\":2021}"),
 			},
 		}
@@ -422,6 +422,7 @@ func TestBatchGetItemAllMisses(t *testing.T) {
 	// Attach Momento Caching Middleware
 	AttachNewCachingMiddleware(&config, tableName, mmc)
 	ddbClient := dynamodb.NewFromConfig(config)
+
 	tableInfo := TableBasics{DynamoDbClient: ddbClient, TableName: tableName}
 	_, err := tableInfo.createTestTable()
 	if err != nil {
@@ -431,9 +432,6 @@ func TestBatchGetItemAllMisses(t *testing.T) {
 		err = tableInfo.addMovie(Movie{
 			Title: "A Movie Part " + fmt.Sprint(i),
 			Year:  2021,
-			//Info: map[string]interface{}{
-			//	"plot": "Nothing happens at all.",
-			//},
 		})
 		if err != nil {
 			t.Errorf("error adding data: %+v", err)
