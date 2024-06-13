@@ -70,22 +70,24 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 	gotMiss := false
 
 	// Loop through all tables and keys in the request
-	for tableName := range input.RequestItems {
+	for tableName, keys := range input.RequestItems {
 		if responsesToReturn[tableName] == nil {
 			responsesToReturn[tableName] = []map[string]types.AttributeValue{}
 		}
-		keys := input.RequestItems[tableName].Keys
-		for _, key := range keys {
+		for _, key := range keys.Keys {
+			fmt.Printf("computing GET key from table: %s and key: %v\n", tableName, key)
 			cacheKey, err := ComputeCacheKey(tableName, key)
 			// TODO: do we really want to do this? This means users can never access data if our service is down.
 			//  Seems like we should just consider this a miss and move on.
 			if err != nil {
 				return middleware.InitializeOutput{}, fmt.Errorf("error getting key for caching: %w", err)
 			}
+			fmt.Printf("cacheKey: %s\n", cacheKey)
 			rsp, err := d.momentoClient.Get(ctx, &momento.GetRequest{
 				CacheName: d.cacheName,
 				Key:       momento.String(cacheKey),
 			})
+			// TODO: Same question as above. This should probably just be a miss?
 			if err != nil {
 				return middleware.InitializeOutput{}, fmt.Errorf("error looking up item in cache: %w", err)
 			}
@@ -121,9 +123,40 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 	}
 
 	// On MISS Let middleware chains continue, so we can get result and try to cache it
-	//out, _, err := next.HandleInitialize(ctx, in)
+	out, _, err := next.HandleInitialize(ctx, in)
 
-	return middleware.InitializeOutput{}, errors.New("not implemented")
+	if err == nil {
+		switch o := out.Result.(type) {
+		case *dynamodb.BatchGetItemOutput:
+			for tableName, items := range o.Responses {
+				for _, item := range items {
+					j, err := MarshalToJson(&dynamodb.GetItemOutput{
+						Item: item,
+					})
+					if err != nil {
+						return out, err // don't return error
+					}
+
+					fmt.Printf("computing SET key from table: %s and key: %v\n", tableName, item)
+
+					cacheKey, err := ComputeCacheKey(tableName, item)
+					// set item in momento cache
+					_, err = d.momentoClient.Set(ctx, &momento.SetRequest{
+						CacheName: d.cacheName,
+						Key:       momento.String(cacheKey),
+						Value:     momento.Bytes(j),
+					})
+					if err != nil {
+						log.Printf("error storing item in cache err=%+v\n", err)
+						return out, nil // don't return err
+					}
+				}
+			}
+		}
+	}
+
+	// unsupported output just return output and dont do anything
+	return out, err
 }
 
 func (d *cachingMiddleware) handleGetItemCommand(ctx context.Context, input *dynamodb.GetItemInput, in middleware.InitializeInput, next middleware.InitializeHandler) (middleware.InitializeOutput, error) {
@@ -206,11 +239,19 @@ func ComputeCacheKey(tableName string, keys map[string]types.AttributeValue) (st
 		return "", err
 	}
 
+	var keyNames []string
+	for k := range t {
+		keyNames = append(keyNames, k)
+	}
+	fmt.Printf("keyNames: %v\n", keyNames)
+
 	// encode key as json string
 	out, err := json.Marshal(t)
 	if err != nil {
 		return "", err
 	}
+
+	fmt.Printf("json key: %s\n", string(out))
 
 	// prefix JSON key w/ table name and convert to fixed length hash
 	hash := sha256.New()

@@ -389,6 +389,93 @@ func TestBatchGetItemAllHits(t *testing.T) {
 	tableInfo.deleteTable()
 }
 
+func TestBatchGetItemAllMisses(t *testing.T) {
+	defer setupTest()()
+	var (
+		expectedGetCalls = []momento.Key{
+			momento.String("2527188ede9e7888721b48523fdec8480a4728f954424b05cc50d515df57fa5d"),
+		}
+		expectedSetCalls = []kvPair{
+			{
+				momento.String("5c32eec327933e34b8f460aef288f1e1f68335c0afad263240ec547dfbbe72ff"),
+				momento.Bytes("{\"info\":null,\"title\":\"A Movie Part 1\",\"year\":2021}"),
+			},
+			{
+				momento.String("cca4b1d4b80bccd7eee64d52baa4afe161b388c47808fcb1f0fa5c17c0bb8517"),
+				momento.Bytes("{\"info\":null,\"title\":\"A Movie Part 2\",\"year\":2021}"),
+			},
+		}
+	)
+	// Define Local Mocks used for test
+	mmc := &mockMomentoClient{
+		mockGetResponses: []responses.GetResponse{
+			&responses.GetMiss{},
+			&responses.GetMiss{},
+		},
+		mockSetResponses: []responses.SetResponse{
+			&responses.SetSuccess{},
+			&responses.SetSuccess{},
+		},
+	}
+
+	config := mustGetAWSConfig()
+	// Attach Momento Caching Middleware
+	AttachNewCachingMiddleware(&config, tableName, mmc)
+	ddbClient := dynamodb.NewFromConfig(config)
+	tableInfo := TableBasics{DynamoDbClient: ddbClient, TableName: tableName}
+	_, err := tableInfo.createTestTable()
+	if err != nil {
+		t.Errorf("error creating table: %+v", err)
+	}
+	for i := 0; i < 20; i++ {
+		err = tableInfo.addMovie(Movie{
+			Title: "A Movie Part " + fmt.Sprint(i),
+			Year:  2021,
+			//Info: map[string]interface{}{
+			//	"plot": "Nothing happens at all.",
+			//},
+		})
+		if err != nil {
+			t.Errorf("error adding data: %+v", err)
+		}
+	}
+
+	myMovie1 := Movie{
+		Title: "A Movie Part 1",
+		Year:  2021,
+	}
+	myMovie2 := Movie{
+		Title: "A Movie Part 2",
+		Year:  2021,
+	}
+	req := &dynamodb.BatchGetItemInput{
+		RequestItems: map[string]types.KeysAndAttributes{
+			tableName: {
+				Keys: []map[string]types.AttributeValue{
+					myMovie1.getKey(),
+					myMovie2.getKey(),
+				},
+			},
+		},
+	}
+	response, err := ddbClient.BatchGetItem(context.TODO(), req)
+	if err != nil {
+		t.Errorf("error occurred calling batch get item: %+v\n", err)
+	}
+
+	fmt.Printf("DDB Response: %+v\n", response)
+
+	if !reflect.DeepEqual(mmc.getCalls, expectedGetCalls) {
+		t.Errorf("get not called on momento client with expected keys %+v", mmc.getCalls)
+	}
+
+	if !reflect.DeepEqual(mmc.setCalls, expectedSetCalls) {
+		t.Errorf("set not called on momento client with expected keys %+v", mmc.setCalls)
+	}
+
+	tableInfo.deleteTable()
+}
+
 // use to inspect dynamo batchGetItem response
 func printResponse(response *dynamodb.BatchGetItemOutput) {
 	fmt.Printf("DDB Response: %+v\n", response)
@@ -423,7 +510,7 @@ type kvPair struct {
 }
 
 func (c *mockMomentoClient) Get(ctx context.Context, r *momento.GetRequest) (responses.GetResponse, error) {
-	//fmt.Printf("======== GET key: %s\n", r.Key)
+	fmt.Printf("======== GET key: %s\n", r.Key)
 	c.getCalls = append(c.getCalls, r.Key)
 	if c.getError != nil {
 		return nil, c.getError
@@ -434,9 +521,10 @@ func (c *mockMomentoClient) Get(ctx context.Context, r *momento.GetRequest) (res
 }
 
 func (c *mockMomentoClient) Set(ctx context.Context, r *momento.SetRequest) (responses.SetResponse, error) {
-	//fmt.Printf("======== SET key: %s\n", r.Key)
+	fmt.Printf("======== SET key: %s\n", r.Key)
+	fmt.Printf("======== SET value: %s\n", r.Value)
 	c.setCalls = append(c.setCalls, kvPair{r.Key, r.Value.(momento.Bytes)})
-	rsp := c.mockSetResponses[0]
+	rsp := c.mockSetResponses[setRequestIndex]
 	setRequestIndex++
 	return rsp, nil
 }
