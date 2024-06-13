@@ -143,12 +143,21 @@ func (basics TableBasics) deleteTable() {
 	}
 }
 
+func setupTest() func() {
+	getRequestIndex = 0
+	setRequestIndex = 0
+	return func() {
+		// teardown code here if any
+	}
+}
+
 func TestLocalDdb(t *testing.T) {
 	tableInfo := populateDdbLocal()
 	tableInfo.deleteTable()
 }
 
 func TestGetItemCacheMiss(t *testing.T) {
+	defer setupTest()()
 	var (
 		expectedKeyHashValue   = "ba805c7ef6e7aa579a8fd513ee73445e8d7a33d05fbf07c25a0a2d9d9a933a68"
 		mockMomentoGetResponse = &responses.GetMiss{}
@@ -201,6 +210,7 @@ func TestGetItemCacheMiss(t *testing.T) {
 }
 
 func TestGetItemHit(t *testing.T) {
+	defer setupTest()()
 	var (
 		expectedKeyHashValue   = "ba805c7ef6e7aa579a8fd513ee73445e8d7a33d05fbf07c25a0a2d9d9a933a68"
 		mockMomentoGetResponse = responses.NewGetHit([]byte(fmt.Sprintf(`{"%s":"%s"}`, "foo", "bar")))
@@ -242,6 +252,7 @@ func TestGetItemHit(t *testing.T) {
 }
 
 func TestGetItemError(t *testing.T) {
+	defer setupTest()()
 	var (
 		expectedKeyHashValue   = "ba805c7ef6e7aa579a8fd513ee73445e8d7a33d05fbf07c25a0a2d9d9a933a68"
 		mockMomentoGetResponse = responses.GetMiss{}
@@ -294,6 +305,7 @@ func TestGetItemError(t *testing.T) {
 }
 
 func TestBatchGetItemAllHits(t *testing.T) {
+	defer setupTest()()
 	var (
 		expectedGetCalls = []momento.Key{
 			momento.String("2527188ede9e7888721b48523fdec8480a4728f954424b05cc50d515df57fa5d"),
