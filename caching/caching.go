@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
@@ -254,23 +255,23 @@ func ComputeCacheKey(tableName string, keys map[string]types.AttributeValue) (st
 		return "", err
 	}
 
-	var keyNames []string
-	for k := range t {
-		keyNames = append(keyNames, k)
+	fieldToValue := make(map[string]string)
+	mapKeys := make([]string, 0, len(t))
+	for k, v := range t {
+		fmt.Printf("key: %s, value: %v\n", k, v)
+		mapKeys = append(mapKeys, k)
+		fieldToValue[k] = fmt.Sprintf("|%s|%v|", k, v)
 	}
-	fmt.Printf("keyNames: %v\n", keyNames)
+	sort.Strings(mapKeys)
 
-	// encode key as json string
-	out, err := json.Marshal(t)
-	if err != nil {
-		return "", err
+	out := ""
+	for _, k := range mapKeys {
+		out += fieldToValue[k]
 	}
 
-	fmt.Printf("json key: %s\n", string(out))
-
-	// prefix JSON key w/ table name and convert to fixed length hash
+	// prefix key w/ table name and convert to fixed length hash
 	hash := sha256.New()
-	hash.Write([]byte(tableName + string(out)))
+	hash.Write([]byte(tableName + out))
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
