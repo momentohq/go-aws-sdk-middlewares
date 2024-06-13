@@ -130,9 +130,7 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 		case *dynamodb.BatchGetItemOutput:
 			for tableName, items := range o.Responses {
 				for _, item := range items {
-					j, err := MarshalToJson(&dynamodb.GetItemOutput{
-						Item: item,
-					})
+					j, err := MarshalToJson(item)
 					if err != nil {
 						return out, err // don't return error
 					}
@@ -209,7 +207,7 @@ func (d *cachingMiddleware) handleGetItemCommand(ctx context.Context, input *dyn
 		case *dynamodb.GetItemOutput:
 
 			// unmarshal raw response object to DDB attribute values map and encode as json
-			j, err := MarshalToJson(o)
+			j, err := MarshalToJson(o.Item)
 			if err != nil {
 				return out, err // don't return error
 			}
@@ -275,10 +273,10 @@ func GetMarshalMap(r *responses.GetHit) (map[string]types.AttributeValue, error)
 	return marshalMap, nil
 }
 
-func MarshalToJson(item *dynamodb.GetItemOutput) ([]byte, error) {
+func MarshalToJson(item map[string]types.AttributeValue) ([]byte, error) {
 	// unmarshal raw response object to DDB attribute values map
 	var t map[string]interface{}
-	err := attributevalue.UnmarshalMap(item.Item, &t)
+	err := attributevalue.UnmarshalMap(item, &t)
 	if err != nil {
 		log.Printf("error decoding output item to store in cache err=%+v\n", err)
 		return nil, fmt.Errorf("error decoding output item to store in cache err=%+v\n", err)
