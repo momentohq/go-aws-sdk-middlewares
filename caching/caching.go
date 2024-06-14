@@ -66,21 +66,21 @@ func NewCachingMiddleware(mw *cachingMiddleware) middleware.InitializeMiddleware
 }
 
 func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input *dynamodb.BatchGetItemInput, in middleware.InitializeInput, next middleware.InitializeHandler) (middleware.InitializeOutput, error) {
-
 	responsesToReturn := make(map[string][]map[string]types.AttributeValue)
 	// for now any cache miss is considered a miss for the whole batch
 	gotMiss := false
 	// this holds the keys for each DDB table in the request and is used to compute the cache key for
 	// cache set operations
 	tableToKeys := make(map[string][]string)
+	var cacheKeys []momento.Key
 
 	for tableName, keys := range input.RequestItems {
+		// TODO: it may be preferable/safer to query the table for the keys
 		gatherKeys := false
 		if tableToKeys[tableName] == nil {
 			tableToKeys[tableName] = []string{}
 			gatherKeys = true
 		}
-		fmt.Printf("keys: %v\n", keys.Keys)
 		if responsesToReturn[tableName] == nil {
 			responsesToReturn[tableName] = []map[string]types.AttributeValue{}
 		}
@@ -91,13 +91,12 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 				}
 				gatherKeys = false
 			}
-			fmt.Printf("table2Keys: %v\n", tableToKeys[tableName])
-			fmt.Printf("computing GET key from table: %s and key: %v\n", tableName, key)
 			cacheKey, err := ComputeCacheKey(tableName, key)
 			if err != nil {
 				return middleware.InitializeOutput{}, fmt.Errorf("error getting key for caching: %w", err)
 			}
-			fmt.Printf("cacheKey: %s\n", cacheKey)
+			cacheKeys = append(cacheKeys, momento.String(cacheKey))
+
 			rsp, err := d.momentoClient.Get(ctx, &momento.GetRequest{
 				CacheName: d.cacheName,
 				Key:       momento.String(cacheKey),
@@ -116,7 +115,6 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 			case *responses.GetMiss:
 				// TODO: for now we're considering any miss a miss for the whole batch
 				gotMiss = true
-				fmt.Println("miss")
 			default:
 				return middleware.InitializeOutput{}, fmt.Errorf("unknown type for momento.GetResponse: %T", r)
 			}
@@ -154,7 +152,6 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 					itemForKey := map[string]types.AttributeValue{}
 					for _, key := range tableToKeys[tableName] {
 						itemForKey[key] = item[key]
-						fmt.Printf("key: %v\n", key)
 					}
 
 					cacheKey, err := ComputeCacheKey(tableName, itemForKey)
@@ -204,7 +201,7 @@ func (d *cachingMiddleware) handleGetItemCommand(ctx context.Context, input *dyn
 			// On hit decode value from stored json to DDB attribute map
 			marshalMap, err := GetMarshalMap(r)
 			if err != nil {
-				return middleware.InitializeOutput{}, fmt.Errorf("error with martial map: %w", err)
+				return middleware.InitializeOutput{}, fmt.Errorf("error with marshal map: %w", err)
 			}
 			// Return user spoofed dynamodb.GetItemOutput.Item w/ cached value
 			return struct{ Result interface{} }{Result: &dynamodb.GetItemOutput{
@@ -258,7 +255,6 @@ func ComputeCacheKey(tableName string, keys map[string]types.AttributeValue) (st
 	fieldToValue := make(map[string]string)
 	mapKeys := make([]string, 0, len(t))
 	for k, v := range t {
-		fmt.Printf("key: %s, value: %v\n", k, v)
 		mapKeys = append(mapKeys, k)
 		fieldToValue[k] = fmt.Sprintf("|%s|%v|", k, v)
 	}
