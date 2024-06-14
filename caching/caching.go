@@ -72,7 +72,6 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 	// this holds the keys for each DDB table in the request and is used to compute the cache key for
 	// cache set operations
 	tableToKeys := make(map[string][]string)
-	var cacheKeys []momento.Key
 
 	for tableName, keys := range input.RequestItems {
 		// TODO: it may be preferable/safer to query the table for the keys
@@ -95,7 +94,6 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 			if err != nil {
 				return middleware.InitializeOutput{}, fmt.Errorf("error getting key for caching: %w", err)
 			}
-			cacheKeys = append(cacheKeys, momento.String(cacheKey))
 
 			rsp, err := d.momentoClient.Get(ctx, &momento.GetRequest{
 				CacheName: d.cacheName,
@@ -155,6 +153,9 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 					}
 
 					cacheKey, err := ComputeCacheKey(tableName, itemForKey)
+					if err != nil {
+						return middleware.InitializeOutput{}, fmt.Errorf("error getting key for caching: %w", err)
+					}
 					// set item in momento cache
 					_, err = d.momentoClient.Set(ctx, &momento.SetRequest{
 						CacheName: d.cacheName,
@@ -293,14 +294,14 @@ func MarshalToJson(item map[string]types.AttributeValue) ([]byte, error) {
 	err := attributevalue.UnmarshalMap(item, &t)
 	if err != nil {
 		log.Printf("error decoding output item to store in cache err=%+v\n", err)
-		return nil, fmt.Errorf("error decoding output item to store in cache err=%+v\n", err)
+		return nil, fmt.Errorf("error decoding output item to store in cache err=%+v", err)
 	}
 
 	// Marshal to JSON to store in cache
 	j, err := json.Marshal(t)
 	if err != nil {
 		log.Printf("error json encoding new item to store in cache err=%+v\n", err)
-		return nil, fmt.Errorf("error json encoding new item to store in cache err=%+v\n", err)
+		return nil, fmt.Errorf("error json encoding new item to store in cache err=%+v", err)
 	}
 	return j, nil
 }
