@@ -1,6 +1,6 @@
 module github.com/momentohq/go-aws-sdk-middlewares
 
-go 1.20
+go 1.19
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.27.0
@@ -9,8 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.10.31
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.32.6
 	github.com/aws/smithy-go v1.20.2
-	github.com/gorilla/mux v1.8.1
-	github.com/momentohq/client-sdk-go v1.7.0
+	github.com/momentohq/client-sdk-go v1.22.0
 )
 
 require (
@@ -26,12 +25,11 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.24.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.28.10 // indirect
 	github.com/golang-jwt/jwt/v4 v4.3.0 // indirect
-	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
-	golang.org/x/net v0.7.0 // indirect
-	golang.org/x/sys v0.5.0 // indirect
-	golang.org/x/text v0.7.0 // indirect
-	google.golang.org/genproto v0.0.0-20221118155620-16455021b5e6 // indirect
-	google.golang.org/grpc v1.52.0 // indirect
-	google.golang.org/protobuf v1.28.1 // indirect
+	golang.org/x/net v0.21.0 // indirect
+	golang.org/x/sys v0.17.0 // indirect
+	golang.org/x/text v0.14.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20240227224415-6ceb2ff114de // indirect
+	google.golang.org/grpc v1.63.0 // indirect
+	google.golang.org/protobuf v1.33.0 // indirect
 )
