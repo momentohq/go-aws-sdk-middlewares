@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/momentohq/client-sdk-go/auth"
-	"github.com/momentohq/client-sdk-go/config"
 	"log"
 	"reflect"
 	"testing"
@@ -19,6 +17,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/momentohq/client-sdk-go/auth"
+	"github.com/momentohq/client-sdk-go/config"
 	"github.com/momentohq/client-sdk-go/momento"
 	"github.com/momentohq/client-sdk-go/responses"
 )
@@ -51,9 +51,7 @@ var (
 	}
 	movie1hash     = "1e21f0974977886cb33d2ca173f89cb9c3c1c5e84712ee07d3fab031817751f2"
 	movie2hash     = "f334e26f2f40da3172e2dd668a18c58b95b2472a8891ea5a0c63d67ed57c6660"
-	movie1json     = "{\"info\":null,\"title\":\"A Movie Part 1\",\"year\":2021}"
 	movie1json2022 = "{\"info\":null,\"title\":\"A Movie Part 1\",\"year\":2022}"
-	movie2json     = "{\"info\":null,\"title\":\"A Movie Part 2\",\"year\":2021}"
 	movie2json2022 = "{\"info\":null,\"title\":\"A Movie Part 2\",\"year\":2022}"
 )
 
@@ -298,6 +296,39 @@ func TestBatchGetItemAllMisses(t *testing.T) {
 			}
 		}
 	}
+
+	// make sure results were set in Momento cache
+	getResp, err := momentoClient.GetBatch(context.Background(), &momento.GetBatchRequest{
+		CacheName: tableName,
+		Keys: []momento.Key{
+			momento.String(movie1hash),
+			momento.String(movie2hash),
+		},
+	})
+	if err != nil {
+		t.Errorf("error occured calling momento get: %+v", err)
+	}
+
+	switch r := getResp.(type) {
+	case responses.GetBatchSuccess:
+		for _, element := range r.Results() {
+			switch e := element.(type) {
+			case *responses.GetHit:
+				movieInfo, err := getMapFromJsonBytes(e.ValueByte())
+				fmt.Printf("movieInfo: %+v\n", movieInfo)
+				if err != nil {
+					t.Errorf("error decoding cache hit: %+v", err)
+				}
+				if fmt.Sprint(movieInfo["year"]) != fmt.Sprint(2021) {
+					t.Errorf("expected cache hit year to match ddb response: %+v", movieInfo)
+				}
+			case *responses.GetMiss:
+				t.Errorf("expected cache hit, got cache miss")
+			}
+		}
+	default:
+		t.Errorf("unknown get batch response type: %T\n", r)
+	}
 }
 
 func TestBatchGetItemsMixed(t *testing.T) {
@@ -334,6 +365,36 @@ func TestBatchGetItemsMixed(t *testing.T) {
 			}
 			if movie.Year != 2021 {
 				t.Errorf("expected ddb hit year to be 2021: %+v", movie)
+			}
+		}
+	}
+
+	// make sure cached versions were overwritten/written
+	getResp, err := momentoClient.GetBatch(context.Background(), &momento.GetBatchRequest{
+		CacheName: tableName,
+		Keys: []momento.Key{
+			momento.String(movie1hash),
+			momento.String(movie2hash),
+		},
+	})
+	if err != nil {
+		t.Errorf("error occured calling momento get: %+v", err)
+	}
+	switch r := getResp.(type) {
+	case responses.GetBatchSuccess:
+		for _, element := range r.Results() {
+			switch e := element.(type) {
+			case *responses.GetHit:
+				movieInfo, err := getMapFromJsonBytes(e.ValueByte())
+				fmt.Printf("movieInfo: %+v\n", movieInfo)
+				if err != nil {
+					t.Errorf("error decoding cache hit: %+v", err)
+				}
+				if fmt.Sprint(movieInfo["year"]) != fmt.Sprint(2021) {
+					t.Errorf("expected cache hit year to match ddb response: %+v", movieInfo)
+				}
+			case *responses.GetMiss:
+				t.Errorf("expected cache hit, got cache miss")
 			}
 		}
 	}
