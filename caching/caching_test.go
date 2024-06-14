@@ -1,9 +1,13 @@
 package caching
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/momentohq/client-sdk-go/auth"
+	"github.com/momentohq/client-sdk-go/config"
 	"log"
 	"reflect"
 	"testing"
@@ -31,6 +35,9 @@ type Movie struct {
 }
 
 var (
+	momentoClient   momento.CacheClient
+	ddbClient       *dynamodb.Client
+	tableInfo       TableBasics
 	tableName       = "movies"
 	getRequestIndex = 0
 	setRequestIndex = 0
@@ -42,98 +49,39 @@ var (
 		Title: "A Movie Part 2",
 		Year:  2021,
 	}
-	movie1hash = "1e21f0974977886cb33d2ca173f89cb9c3c1c5e84712ee07d3fab031817751f2"
-	movie2hash = "f334e26f2f40da3172e2dd668a18c58b95b2472a8891ea5a0c63d67ed57c6660"
-	movie1json = "{\"info\":null,\"title\":\"A Movie Part 1\",\"year\":2021}"
-	movie2json = "{\"info\":null,\"title\":\"A Movie Part 2\",\"year\":2021}"
+	movie1hash     = "1e21f0974977886cb33d2ca173f89cb9c3c1c5e84712ee07d3fab031817751f2"
+	movie2hash     = "f334e26f2f40da3172e2dd668a18c58b95b2472a8891ea5a0c63d67ed57c6660"
+	movie1json     = "{\"info\":null,\"title\":\"A Movie Part 1\",\"year\":2021}"
+	movie1json2022 = "{\"info\":null,\"title\":\"A Movie Part 1\",\"year\":2022}"
+	movie2json     = "{\"info\":null,\"title\":\"A Movie Part 2\",\"year\":2021}"
+	movie2json2022 = "{\"info\":null,\"title\":\"A Movie Part 2\",\"year\":2022}"
 )
-
-func getDdbClientWithMiddleware(momentoClient momento.CacheClient) *dynamodb.Client {
-	amazonConfiguration := mustGetAWSConfig()
-	AttachNewCachingMiddleware(&amazonConfiguration, tableName, momentoClient)
-	return dynamodb.NewFromConfig(amazonConfiguration)
-}
-
-func (basics TableBasics) createTestTable() (*types.TableDescription, error) {
-	var tableDesc *types.TableDescription
-	table, err := basics.DynamoDbClient.CreateTable(context.TODO(), &dynamodb.CreateTableInput{
-		AttributeDefinitions: []types.AttributeDefinition{{
-			AttributeName: aws.String("year"),
-			AttributeType: types.ScalarAttributeTypeN,
-		}, {
-			AttributeName: aws.String("title"),
-			AttributeType: types.ScalarAttributeTypeS,
-		}},
-		KeySchema: []types.KeySchemaElement{{
-			AttributeName: aws.String("year"),
-			KeyType:       types.KeyTypeHash,
-		}, {
-			AttributeName: aws.String("title"),
-			KeyType:       types.KeyTypeRange,
-		}},
-		TableName: aws.String(basics.TableName),
-		ProvisionedThroughput: &types.ProvisionedThroughput{
-			ReadCapacityUnits:  aws.Int64(10),
-			WriteCapacityUnits: aws.Int64(10),
-		},
-	})
-	if err != nil {
-		log.Printf("Couldn't create table %v. Here's why: %v\n", basics.TableName, err)
-	} else {
-		waiter := dynamodb.NewTableExistsWaiter(basics.DynamoDbClient)
-		err = waiter.Wait(context.TODO(), &dynamodb.DescribeTableInput{
-			TableName: aws.String(basics.TableName)}, 5*time.Minute)
-		if err != nil {
-			log.Printf("Wait for table exists failed. Here's why: %v\n", err)
-		}
-		tableDesc = table.TableDescription
-	}
-	return tableDesc, err
-}
-
-func (basics TableBasics) addMovie(movie Movie) error {
-	item, err := attributevalue.MarshalMap(movie)
-	if err != nil {
-		panic(err)
-	}
-	_, err = basics.DynamoDbClient.PutItem(context.TODO(), &dynamodb.PutItemInput{
-		TableName: aws.String(basics.TableName), Item: item,
-	})
-	if err != nil {
-		log.Printf("Couldn't add item to table. Here's why: %v\n", err)
-	}
-	return err
-}
-
-func (movie Movie) getKey() map[string]types.AttributeValue {
-	title, err := attributevalue.Marshal(movie.Title)
-	if err != nil {
-		panic(err)
-	}
-	year, err := attributevalue.Marshal(movie.Year)
-	if err != nil {
-		panic(err)
-	}
-	return map[string]types.AttributeValue{"title": title, "year": year}
-}
-
-func (basics TableBasics) deleteTable() {
-	_, err := basics.DynamoDbClient.DeleteTable(context.TODO(), &dynamodb.DeleteTableInput{
-		TableName: aws.String(basics.TableName),
-	})
-	if err != nil {
-		log.Printf("Couldn't delete table %v. Here's why: %v\n", basics.TableName, err)
-	}
-}
 
 func setupTest() func() {
 	getRequestIndex = 0
 	setRequestIndex = 0
 
-	config := mustGetAWSConfig()
-	ddbClient := dynamodb.NewFromConfig(config)
-	tableInfo := TableBasics{DynamoDbClient: ddbClient, TableName: tableName}
-	_, err := tableInfo.createTestTable()
+	credProvider, err := auth.NewEnvMomentoTokenProvider("MOMENTO_API_KEY")
+	if err != nil {
+		panic(err)
+	}
+	momentoClient, err = momento.NewCacheClient(config.LaptopLatest(), credProvider, 60*time.Second)
+	if err != nil {
+		panic(err)
+	}
+	_, err = momentoClient.CreateCache(context.Background(), &momento.CreateCacheRequest{
+		CacheName: tableName,
+	})
+	if err != nil {
+		panic(err)
+	}
+	ddbClient = getDdbClientWithMiddleware(momentoClient)
+
+	amazonConfig := mustGetAWSConfig()
+	ddbControlClient := dynamodb.NewFromConfig(amazonConfig)
+	tableInfo = TableBasics{DynamoDbClient: ddbControlClient, TableName: tableName}
+
+	_, err = tableInfo.createTestTable()
 	if err != nil {
 		panic(err)
 	}
@@ -150,74 +98,71 @@ func setupTest() func() {
 	// teardown function
 	return func() {
 		tableInfo.deleteTable()
+		_, err := momentoClient.DeleteCache(context.Background(), &momento.DeleteCacheRequest{
+			CacheName: tableName,
+		})
+		if err != nil {
+			panic(err)
+		}
+		momentoClient.Close()
 	}
 }
 
 func TestGetItemCacheMiss(t *testing.T) {
 	defer setupTest()()
-	var (
-		expectedKeyHashValue   = movie1hash
-		mockMomentoGetResponse = &responses.GetMiss{}
-		expectedGetGalls       = []momento.Key{
-			momento.String(expectedKeyHashValue),
-		}
-		expectedSetCalls = []kvPair{{
-			momento.String(expectedKeyHashValue),
-			momento.Bytes(movie1json),
-		}}
-		mockSetResponse = responses.SetSuccess{}
-	)
-
-	// Define Local Mocks used for test
-	mmc := &mockMomentoClient{
-		mockGetResponses: []responses.GetResponse{
-			mockMomentoGetResponse,
-		},
-		mockSetResponses: []responses.SetResponse{
-			mockSetResponse,
-		},
-	}
-	ddbClient := getDdbClientWithMiddleware(mmc)
 
 	// Execute GetItem Request as you would normally
-	_, err := ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
+	resp, err := ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
 		TableName: aws.String(tableName),
 		Key:       movie1.getKey(),
 	})
-
 	if err != nil {
-		t.Errorf("error occured calling get item: %+v", err)
+		t.Errorf("error occured calling ddb get item: %+v", err)
 	}
 
-	if !reflect.DeepEqual(mmc.getCalls, expectedGetGalls) {
-		t.Errorf("get not called on momento client with expected keys %+v", mmc.getCalls)
+	movie, err := getMovieFromDdbItem(resp.Item)
+	if err != nil {
+		t.Errorf("error decoding dynamodb response: %+v", err)
 	}
 
-	if !reflect.DeepEqual(mmc.setCalls, expectedSetCalls) {
-		t.Errorf("set not called on momento client with expected keys %+v", mmc.setCalls)
+	getResp, err := momentoClient.Get(context.Background(), &momento.GetRequest{
+		CacheName: tableName,
+		Key:       momento.String(movie1hash),
+	})
+	if err != nil {
+		t.Errorf("error occured calling momento get: %+v", err)
+	}
+	switch r := getResp.(type) {
+	case *responses.GetHit:
+		movieInfo, err := getMapFromJsonBytes(r.ValueByte())
+		if err != nil {
+			t.Errorf("error decoding cache hit: %+v", err)
+		}
+		if movieInfo["title"] != movie.Title {
+			t.Errorf("expected cache hit title to match dynamodb response: %+v != %+v", movieInfo, movie)
+		}
+		if fmt.Sprint(movieInfo["year"]) != fmt.Sprint(movie.Year) {
+			t.Errorf("expected cache hit year to match dynamodb response: %+v != %+v", movieInfo, movie)
+		}
+	case *responses.GetMiss:
+		t.Errorf("expected cache hit, got cache miss for key %s", movie1hash)
 	}
 }
 
 func TestGetItemHit(t *testing.T) {
 	defer setupTest()()
-	var (
-		expectedKeyHashValue   = movie1hash
-		mockMomentoGetResponse = responses.NewGetHit([]byte(fmt.Sprintf(`{"%s":"%s"}`, "foo", "bar")))
-		expectedGetCalls       = []momento.Key{
-			momento.String(expectedKeyHashValue),
-		}
-	)
 
-	mmc := &mockMomentoClient{
-		mockGetResponses: []responses.GetResponse{
-			mockMomentoGetResponse,
-		},
-		mockSetResponses: []responses.SetResponse{},
+	_, err := momentoClient.Set(context.Background(), &momento.SetRequest{
+		CacheName: tableName,
+		Key:       momento.String(movie1hash),
+		Value:     momento.Bytes(movie1json2022),
+	})
+	if err != nil {
+		t.Errorf("error occured calling momento set: %+v", err)
 	}
-	ddbClient := getDdbClientWithMiddleware(mmc)
 
 	// Execute GetItem Request as you would normally
-	_, err := ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
+	resp, err := ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
 		TableName: aws.String(tableName),
 		Key:       movie1.getKey(),
 	})
@@ -225,34 +170,33 @@ func TestGetItemHit(t *testing.T) {
 		t.Errorf("error occured calling get item: %+v", err)
 	}
 
-	if !reflect.DeepEqual(mmc.getCalls, expectedGetCalls) {
-		t.Errorf("get not called on momento client with expected keys %+v", mmc.getCalls)
+	movie, err := getMovieFromDdbItem(resp.Item)
+	if err != nil {
+		t.Errorf("error decoding dynamodb response: %+v", err)
 	}
 
-	if len(mmc.setCalls) > 0 {
-		t.Errorf("set should not be called on cache hit %+v", mmc.setCalls)
+	if movie.Year != 2022 {
+		t.Errorf("expected cache hit year to be 2022: %+v", movie)
 	}
 }
 
 func TestGetItemError(t *testing.T) {
 	defer setupTest()()
 	var (
-		expectedKeyHashValue   = movie1hash
-		mockMomentoGetResponse = responses.GetMiss{}
-		getError               = momento.NewMomentoError(
+		getError = momento.NewMomentoError(
 			"error-code",
 			"error-message",
 			errors.New("original error"),
 		)
 		expectedGetGalls = []momento.Key{
-			momento.String(expectedKeyHashValue),
+			momento.String(movie1hash),
 		}
-		expectedSetCalls []kvPair // we bail on any error currently just let DDB call go as normal
+		expectedSetCalls []kvPair
 	)
 
 	mmc := &mockMomentoClient{
 		mockGetResponses: []responses.GetResponse{
-			mockMomentoGetResponse,
+			responses.GetMiss{},
 		},
 		getError: getError,
 		mockSetResponses: []responses.SetResponse{
@@ -281,31 +225,23 @@ func TestGetItemError(t *testing.T) {
 
 func TestBatchGetItemAllHits(t *testing.T) {
 	defer setupTest()()
-	var (
-		expectedGetCalls = []momento.Key{
-			momento.String(movie1hash),
-			momento.String(movie2hash),
-		}
-	)
-	// Define Local Mocks used for test
-	mmc := &mockMomentoClient{
-		mockGetResponses: []responses.GetResponse{
-			responses.NewGetHit([]byte(
-				fmt.Sprintf(
-					`{"%s":"%s", "%s":%s}`,
-					"Title", "A Movie Part 1", "Year", "2021",
-				),
-			)),
-			responses.NewGetHit([]byte(
-				fmt.Sprintf(
-					`{"%s":"%s", "%s":%s}`,
-					"Title", "A Movie Part 2", "Year", "2021",
-				),
-			)),
+
+	_, err := momentoClient.SetBatch(context.Background(), &momento.SetBatchRequest{
+		CacheName: tableName,
+		Items: []momento.BatchSetItem{
+			{
+				Key:   momento.String(movie1hash),
+				Value: momento.Bytes(movie1json2022),
+			},
+			{
+				Key:   momento.String(movie2hash),
+				Value: momento.Bytes(movie2json2022),
+			},
 		},
-		mockSetResponses: []responses.SetResponse{},
+	})
+	if err != nil {
+		t.Errorf("error occured calling momento set: %+v", err)
 	}
-	ddbClient := getDdbClientWithMiddleware(mmc)
 
 	req := &dynamodb.BatchGetItemInput{
 		RequestItems: map[string]types.KeysAndAttributes{
@@ -317,49 +253,25 @@ func TestBatchGetItemAllHits(t *testing.T) {
 			},
 		},
 	}
-	_, err := ddbClient.BatchGetItem(context.TODO(), req)
+	resp, err := ddbClient.BatchGetItem(context.TODO(), req)
 	if err != nil {
 		t.Errorf("error occurred calling batch get item: %+v\n", err)
 	}
-
-	if !reflect.DeepEqual(mmc.getCalls, expectedGetCalls) {
-		t.Errorf("get not called on momento client with expected keys %+v", mmc.getCalls)
-	}
-
-	if len(mmc.setCalls) > 0 {
-		t.Errorf("set should not be called on cache hit %+v", mmc.setCalls)
+	for _, items := range resp.Responses {
+		for _, item := range items {
+			movie, err := getMovieFromDdbItem(item)
+			if err != nil {
+				t.Errorf("error decoding dynamodb response: %+v", err)
+			}
+			if movie.Year != 2022 {
+				t.Errorf("expected cache hit year to be 2022: %+v", movie)
+			}
+		}
 	}
 }
 
 func TestBatchGetItemAllMisses(t *testing.T) {
 	defer setupTest()()
-	var (
-		expectedGetCalls = []momento.Key{
-			momento.String(movie1hash),
-		}
-		expectedSetCalls = []kvPair{
-			{
-				momento.String(movie1hash),
-				momento.Bytes(movie1json),
-			},
-			{
-				momento.String(movie2hash),
-				momento.Bytes(movie2json),
-			},
-		}
-	)
-	// Define Local Mocks used for test
-	mmc := &mockMomentoClient{
-		mockGetResponses: []responses.GetResponse{
-			&responses.GetMiss{},
-			&responses.GetMiss{},
-		},
-		mockSetResponses: []responses.SetResponse{
-			&responses.SetSuccess{},
-			&responses.SetSuccess{},
-		},
-	}
-	ddbClient := getDdbClientWithMiddleware(mmc)
 
 	req := &dynamodb.BatchGetItemInput{
 		RequestItems: map[string]types.KeysAndAttributes{
@@ -371,55 +283,34 @@ func TestBatchGetItemAllMisses(t *testing.T) {
 			},
 		},
 	}
-	_, err := ddbClient.BatchGetItem(context.TODO(), req)
+	resp, err := ddbClient.BatchGetItem(context.TODO(), req)
 	if err != nil {
 		t.Errorf("error occurred calling batch get item: %+v\n", err)
 	}
-
-	if !reflect.DeepEqual(mmc.getCalls, expectedGetCalls) {
-		t.Errorf("get not called on momento client with expected keys %+v", mmc.getCalls)
-	}
-
-	if !reflect.DeepEqual(mmc.setCalls, expectedSetCalls) {
-		t.Errorf("set not called on momento client with expected keys %+v", mmc.setCalls)
+	for _, items := range resp.Responses {
+		for _, item := range items {
+			movie, err := getMovieFromDdbItem(item)
+			if err != nil {
+				t.Errorf("error decoding dynamodb response: %+v", err)
+			}
+			if movie.Year != 2021 {
+				t.Errorf("expected ddb hit year to be 2021: %+v", movie)
+			}
+		}
 	}
 }
 
 func TestBatchGetItemsMixed(t *testing.T) {
 	defer setupTest()()
-	var (
-		expectedGetCalls = []momento.Key{
-			momento.String(movie1hash),
-			momento.String(movie2hash),
-		}
-		expectedSetCalls = []kvPair{
-			{
-				momento.String(movie1hash),
-				momento.Bytes(movie1json),
-			},
-			{
-				momento.String(movie2hash),
-				momento.Bytes(movie2json),
-			},
-		}
-	)
 
-	mmc := &mockMomentoClient{
-		mockGetResponses: []responses.GetResponse{
-			responses.NewGetHit([]byte(
-				fmt.Sprintf(
-					`{"%s":"%s", "%s":%s}`,
-					"Title", "A Movie Part 1", "Year", "2021",
-				),
-			)),
-			&responses.GetMiss{},
-		},
-		mockSetResponses: []responses.SetResponse{
-			&responses.SetSuccess{},
-			&responses.SetSuccess{},
-		},
+	_, err := momentoClient.Set(context.Background(), &momento.SetRequest{
+		CacheName: tableName,
+		Key:       momento.String(movie1hash),
+		Value:     momento.Bytes(movie1json2022),
+	})
+	if err != nil {
+		t.Errorf("error occured calling momento set: %+v", err)
 	}
-	ddbClient := getDdbClientWithMiddleware(mmc)
 
 	req := &dynamodb.BatchGetItemInput{
 		RequestItems: map[string]types.KeysAndAttributes{
@@ -431,17 +322,20 @@ func TestBatchGetItemsMixed(t *testing.T) {
 			},
 		},
 	}
-	_, err := ddbClient.BatchGetItem(context.TODO(), req)
+	resp, err := ddbClient.BatchGetItem(context.TODO(), req)
 	if err != nil {
 		t.Errorf("error occurred calling batch get item: %+v\n", err)
 	}
-
-	if !reflect.DeepEqual(mmc.getCalls, expectedGetCalls) {
-		t.Errorf("get not called on momento client with expected keys %+v", mmc.getCalls)
-	}
-
-	if !reflect.DeepEqual(mmc.setCalls, expectedSetCalls) {
-		t.Errorf("set not called on momento client with expected keys %+v", mmc.setCalls)
+	for _, items := range resp.Responses {
+		for _, item := range items {
+			movie, err := getMovieFromDdbItem(item)
+			if err != nil {
+				t.Errorf("error decoding dynamodb response: %+v", err)
+			}
+			if movie.Year != 2021 {
+				t.Errorf("expected ddb hit year to be 2021: %+v", movie)
+			}
+		}
 	}
 }
 
@@ -547,4 +441,100 @@ func mustGetAWSConfig() aws.Config {
 	cfg.BaseEndpoint = aws.String("http://localhost:8000")
 	cfg.Credentials = credentials.NewStaticCredentialsProvider("dummy", "dummy", "")
 	return cfg
+}
+
+func getMapFromJsonBytes(jsonBytes []byte) (map[string]interface{}, error) {
+	var myMap map[string]interface{}
+	err := json.NewDecoder(bytes.NewReader(jsonBytes)).Decode(&myMap)
+	if err != nil {
+		return nil, err
+	}
+	return myMap, nil
+}
+
+func getMovieFromDdbItem(item map[string]types.AttributeValue) (Movie, error) {
+	var movie Movie
+	err := attributevalue.UnmarshalMap(item, &movie)
+	if err != nil {
+		return movie, err
+	}
+	return movie, nil
+}
+
+func getDdbClientWithMiddleware(momentoClient momento.CacheClient) *dynamodb.Client {
+	amazonConfiguration := mustGetAWSConfig()
+	AttachNewCachingMiddleware(&amazonConfiguration, tableName, momentoClient)
+	return dynamodb.NewFromConfig(amazonConfiguration)
+}
+
+func (basics TableBasics) createTestTable() (*types.TableDescription, error) {
+	var tableDesc *types.TableDescription
+	table, err := basics.DynamoDbClient.CreateTable(context.TODO(), &dynamodb.CreateTableInput{
+		AttributeDefinitions: []types.AttributeDefinition{{
+			AttributeName: aws.String("year"),
+			AttributeType: types.ScalarAttributeTypeN,
+		}, {
+			AttributeName: aws.String("title"),
+			AttributeType: types.ScalarAttributeTypeS,
+		}},
+		KeySchema: []types.KeySchemaElement{{
+			AttributeName: aws.String("year"),
+			KeyType:       types.KeyTypeHash,
+		}, {
+			AttributeName: aws.String("title"),
+			KeyType:       types.KeyTypeRange,
+		}},
+		TableName: aws.String(basics.TableName),
+		ProvisionedThroughput: &types.ProvisionedThroughput{
+			ReadCapacityUnits:  aws.Int64(10),
+			WriteCapacityUnits: aws.Int64(10),
+		},
+	})
+	if err != nil {
+		log.Printf("Couldn't create table %v. Here's why: %v\n", basics.TableName, err)
+	} else {
+		waiter := dynamodb.NewTableExistsWaiter(basics.DynamoDbClient)
+		err = waiter.Wait(context.TODO(), &dynamodb.DescribeTableInput{
+			TableName: aws.String(basics.TableName)}, 5*time.Minute)
+		if err != nil {
+			log.Printf("Wait for table exists failed. Here's why: %v\n", err)
+		}
+		tableDesc = table.TableDescription
+	}
+	return tableDesc, err
+}
+
+func (basics TableBasics) addMovie(movie Movie) error {
+	item, err := attributevalue.MarshalMap(movie)
+	if err != nil {
+		panic(err)
+	}
+	_, err = basics.DynamoDbClient.PutItem(context.TODO(), &dynamodb.PutItemInput{
+		TableName: aws.String(basics.TableName), Item: item,
+	})
+	if err != nil {
+		log.Printf("Couldn't add item to table. Here's why: %v\n", err)
+	}
+	return err
+}
+
+func (movie Movie) getKey() map[string]types.AttributeValue {
+	title, err := attributevalue.Marshal(movie.Title)
+	if err != nil {
+		panic(err)
+	}
+	year, err := attributevalue.Marshal(movie.Year)
+	if err != nil {
+		panic(err)
+	}
+	return map[string]types.AttributeValue{"title": title, "year": year}
+}
+
+func (basics TableBasics) deleteTable() {
+	_, err := basics.DynamoDbClient.DeleteTable(context.TODO(), &dynamodb.DeleteTableInput{
+		TableName: aws.String(basics.TableName),
+	})
+	if err != nil {
+		log.Printf("Couldn't delete table %v. Here's why: %v\n", basics.TableName, err)
+	}
 }
