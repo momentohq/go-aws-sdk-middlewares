@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"reflect"
 	"testing"
 	"time"
 
@@ -19,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/momentohq/client-sdk-go/auth"
 	"github.com/momentohq/client-sdk-go/config"
+	"github.com/momentohq/client-sdk-go/config/logger"
 	"github.com/momentohq/client-sdk-go/momento"
 	"github.com/momentohq/client-sdk-go/responses"
 )
@@ -35,13 +35,11 @@ type Movie struct {
 }
 
 var (
-	momentoClient   momento.CacheClient
-	ddbClient       *dynamodb.Client
-	tableInfo       TableBasics
-	tableName       = "movies"
-	getRequestIndex = 0
-	setRequestIndex = 0
-	movie1          = Movie{
+	momentoClient momento.CacheClient
+	ddbClient     *dynamodb.Client
+	tableInfo     TableBasics
+	tableName     = "movies"
+	movie1        = Movie{
 		Title: "A Movie Part 1",
 		Year:  2021,
 	}
@@ -56,14 +54,13 @@ var (
 )
 
 func setupTest() func() {
-	getRequestIndex = 0
-	setRequestIndex = 0
-
 	credProvider, err := auth.NewEnvMomentoTokenProvider("MOMENTO_API_KEY")
 	if err != nil {
 		panic(err)
 	}
-	momentoClient, err = momento.NewCacheClient(config.LaptopLatest(), credProvider, 60*time.Second)
+	momentoClient, err = momento.NewCacheClient(
+		config.LaptopLatestWithLogger(logger.NewNoopMomentoLoggerFactory()), credProvider, 60*time.Second,
+	)
 	if err != nil {
 		panic(err)
 	}
@@ -180,31 +177,11 @@ func TestGetItemHit(t *testing.T) {
 
 func TestGetItemError(t *testing.T) {
 	defer setupTest()()
-	var (
-		getError = momento.NewMomentoError(
-			"error-code",
-			"error-message",
-			errors.New("original error"),
-		)
-		expectedGetGalls = []momento.Key{
-			momento.String(movie1hash),
-		}
-		expectedSetCalls []kvPair
-	)
-
-	mmc := &mockMomentoClient{
-		mockGetResponses: []responses.GetResponse{
-			responses.GetMiss{},
-		},
-		getError: getError,
-		mockSetResponses: []responses.SetResponse{
-			responses.SetSuccess{},
-		},
-	}
+	mmc := &mockMomentoClient{}
 	ddbClient := getDdbClientWithMiddleware(mmc)
 
 	// Execute GetItem Request as you would normally
-	_, err := ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
+	resp, err := ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
 		TableName: aws.String(tableName),
 		Key:       movie1.getKey(),
 	})
@@ -212,12 +189,12 @@ func TestGetItemError(t *testing.T) {
 		t.Errorf("error occured calling get item: %+v", err)
 	}
 
-	if !reflect.DeepEqual(mmc.getCalls, expectedGetGalls) {
-		t.Errorf("get not called on momento client with expected keys %+v", mmc.getCalls)
+	movie, err := getMovieFromDdbItem(resp.Item)
+	if err != nil {
+		t.Errorf("error decoding dynamodb response: %+v", err)
 	}
-
-	if !reflect.DeepEqual(mmc.setCalls, expectedSetCalls) {
-		t.Errorf("set not called on momento client with expected keys %+v", mmc.setCalls)
+	if movie.Year != 2021 {
+		t.Errorf("expected ddb hit year to be 2021: %+v", movie)
 	}
 }
 
@@ -385,7 +362,6 @@ func TestBatchGetItemsMixed(t *testing.T) {
 			switch e := element.(type) {
 			case *responses.GetHit:
 				movieInfo, err := getMapFromJsonBytes(e.ValueByte())
-				fmt.Printf("movieInfo: %+v\n", movieInfo)
 				if err != nil {
 					t.Errorf("error decoding cache hit: %+v", err)
 				}
@@ -401,25 +377,7 @@ func TestBatchGetItemsMixed(t *testing.T) {
 
 func TestBatchGetItemsError(t *testing.T) {
 	defer setupTest()()
-	var (
-		mockMomentoGetResponse = responses.GetMiss{}
-		getError               = momento.NewMomentoError(
-			"error-code",
-			"error-message",
-			errors.New("original error"),
-		)
-	)
-
-	mmc := &mockMomentoClient{
-		mockGetResponses: []responses.GetResponse{
-			mockMomentoGetResponse,
-		},
-		getError: getError,
-		mockSetResponses: []responses.SetResponse{
-			responses.SetSuccess{},
-			responses.SetSuccess{},
-		},
-	}
+	mmc := &mockMomentoClient{}
 	ddbClient := getDdbClientWithMiddleware(mmc)
 
 	req := &dynamodb.BatchGetItemInput{
@@ -456,40 +414,18 @@ func TestBatchGetItemsError(t *testing.T) {
 // Mock momento Service used for testing
 type mockMomentoClient struct {
 	momento.CacheClient
-
-	mockGetResponses []responses.GetResponse
-	mockSetResponses []responses.SetResponse
-
-	getError error
-
-	getCalls []momento.Key
-	setCalls []kvPair
 }
 
-type kvPair struct {
-	key   momento.Key
-	value momento.Bytes
-}
-
-func (c *mockMomentoClient) Get(ctx context.Context, r *momento.GetRequest) (responses.GetResponse, error) {
-	c.getCalls = append(c.getCalls, r.Key)
-	if c.getError != nil {
-		return nil, c.getError
-	}
-	rsp := c.mockGetResponses[getRequestIndex]
-	getRequestIndex++
-	return rsp, nil
-}
-
-func (c *mockMomentoClient) GetBatch(ctx context.Context, r *momento.GetBatchRequest) (responses.GetBatchResponse, error) {
+func (c *mockMomentoClient) Get(_ context.Context, r *momento.GetRequest) (responses.GetResponse, error) {
 	return nil, momento.NewMomentoError("error-code", "error-message", errors.New("original error"))
 }
 
-func (c *mockMomentoClient) Set(ctx context.Context, r *momento.SetRequest) (responses.SetResponse, error) {
-	c.setCalls = append(c.setCalls, kvPair{r.Key, r.Value.(momento.Bytes)})
-	rsp := c.mockSetResponses[setRequestIndex]
-	setRequestIndex++
-	return rsp, nil
+func (c *mockMomentoClient) GetBatch(_ context.Context, r *momento.GetBatchRequest) (responses.GetBatchResponse, error) {
+	return nil, momento.NewMomentoError("error-code", "error-message", errors.New("original error"))
+}
+
+func (c *mockMomentoClient) Set(_ context.Context, r *momento.SetRequest) (responses.SetResponse, error) {
+	return nil, momento.NewMomentoError("error-code", "error-message", errors.New("original error"))
 }
 
 func mustGetAWSConfig() aws.Config {
