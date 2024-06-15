@@ -315,7 +315,6 @@ func TestBatchGetItemAllMisses(t *testing.T) {
 			switch e := element.(type) {
 			case *responses.GetHit:
 				movieInfo, err := getMapFromJsonBytes(e.ValueByte())
-				fmt.Printf("movieInfo: %+v\n", movieInfo)
 				if err != nil {
 					t.Errorf("error decoding cache hit: %+v", err)
 				}
@@ -403,17 +402,12 @@ func TestBatchGetItemsMixed(t *testing.T) {
 func TestBatchGetItemsError(t *testing.T) {
 	defer setupTest()()
 	var (
-		expectedKeyHashValue   = movie1hash
 		mockMomentoGetResponse = responses.GetMiss{}
 		getError               = momento.NewMomentoError(
 			"error-code",
 			"error-message",
 			errors.New("original error"),
 		)
-		expectedGetGalls = []momento.Key{
-			momento.String(expectedKeyHashValue),
-		}
-		expectedSetCalls []kvPair // we bail on any error currently just let DDB call go as normal
 	)
 
 	mmc := &mockMomentoClient{
@@ -439,17 +433,21 @@ func TestBatchGetItemsError(t *testing.T) {
 		},
 	}
 
-	_, err := ddbClient.BatchGetItem(context.TODO(), req)
+	resp, err := ddbClient.BatchGetItem(context.TODO(), req)
 	if err != nil {
 		t.Errorf("error occured calling get item: %+v", err)
 	}
-
-	if !reflect.DeepEqual(mmc.getCalls, expectedGetGalls) {
-		t.Errorf("get not called on momento client with expected keys %+v", mmc.getCalls)
-	}
-
-	if !reflect.DeepEqual(mmc.setCalls, expectedSetCalls) {
-		t.Errorf("set not called on momento client with expected keys %+v", mmc.setCalls)
+	// Momento client errored out, so we should get DDB data
+	for _, items := range resp.Responses {
+		for _, item := range items {
+			movie, err := getMovieFromDdbItem(item)
+			if err != nil {
+				t.Errorf("error decoding dynamodb response: %+v", err)
+			}
+			if movie.Year != 2021 {
+				t.Errorf("expected ddb hit year to be 2021: %+v", movie)
+			}
+		}
 	}
 }
 
@@ -481,6 +479,10 @@ func (c *mockMomentoClient) Get(ctx context.Context, r *momento.GetRequest) (res
 	rsp := c.mockGetResponses[getRequestIndex]
 	getRequestIndex++
 	return rsp, nil
+}
+
+func (c *mockMomentoClient) GetBatch(ctx context.Context, r *momento.GetBatchRequest) (responses.GetBatchResponse, error) {
+	return nil, momento.NewMomentoError("error-code", "error-message", errors.New("original error"))
 }
 
 func (c *mockMomentoClient) Set(ctx context.Context, r *momento.SetRequest) (responses.SetResponse, error) {
