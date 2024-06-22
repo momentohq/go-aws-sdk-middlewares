@@ -19,6 +19,7 @@ import (
 	"github.com/momentohq/client-sdk-go/auth"
 	"github.com/momentohq/client-sdk-go/config"
 	"github.com/momentohq/client-sdk-go/config/logger"
+	"github.com/momentohq/client-sdk-go/config/logger/momento_default_logger"
 	"github.com/momentohq/client-sdk-go/momento"
 	"github.com/momentohq/client-sdk-go/responses"
 )
@@ -59,7 +60,11 @@ func setupTest() func() {
 		panic(err)
 	}
 	momentoClient, err = momento.NewCacheClient(
-		config.LaptopLatestWithLogger(logger.NewNoopMomentoLoggerFactory()), credProvider, 60*time.Second,
+		config.LaptopLatestWithLogger(
+			momento_default_logger.NewDefaultMomentoLoggerFactory(momento_default_logger.DEBUG),
+		),
+		credProvider,
+		60*time.Second,
 	)
 	if err != nil {
 		panic(err)
@@ -414,6 +419,10 @@ func TestBatchGetItemsError(t *testing.T) {
 // Mock momento Service used for testing
 type mockMomentoClient struct {
 	momento.CacheClient
+}
+
+func (c *mockMomentoClient) Logger() logger.MomentoLogger {
+	return momento_default_logger.NewDefaultMomentoLoggerFactory(momento_default_logger.DEBUG).GetLogger("mock-momento-client")
 }
 
 func (c *mockMomentoClient) Get(_ context.Context, r *momento.GetRequest) (responses.GetResponse, error) {
