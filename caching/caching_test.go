@@ -341,10 +341,14 @@ func TestBatchGetItemsMixed(t *testing.T) {
 	for _, items := range resp.Responses {
 		for _, item := range items {
 			movie, err := getMovieFromDdbItem(item)
+			fmt.Printf("movie: %+v\n", movie)
 			if err != nil {
 				t.Errorf("error decoding dynamodb response: %+v", err)
 			}
-			if movie.Year != 2021 {
+			if movie.Title == "A Movie Part 1" && movie.Year != 2022 {
+				t.Errorf("expected cache hit year to be 2022: %+v", movie)
+			}
+			if movie.Title == "A Movie Part 2" && movie.Year != 2021 {
 				t.Errorf("expected ddb hit year to be 2021: %+v", movie)
 			}
 		}
@@ -370,8 +374,11 @@ func TestBatchGetItemsMixed(t *testing.T) {
 				if err != nil {
 					t.Errorf("error decoding cache hit: %+v", err)
 				}
-				if fmt.Sprint(movieInfo["year"]) != fmt.Sprint(2021) {
+				if movieInfo["title"] == "A Movie Part 1" && fmt.Sprint(movieInfo["year"]) != fmt.Sprint(2022) {
 					t.Errorf("expected cache hit year to match ddb response: %+v", movieInfo)
+				}
+				if movieInfo["title"] == "A Movie Part 2" && fmt.Sprint(movieInfo["year"]) != fmt.Sprint(2021) {
+					t.Errorf("expected ddb hit year: %+v", movieInfo)
 				}
 			case *responses.GetMiss:
 				t.Errorf("expected cache hit, got cache miss")

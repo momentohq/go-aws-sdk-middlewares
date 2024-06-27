@@ -70,14 +70,18 @@ func NewCachingMiddleware(mw *cachingMiddleware) middleware.InitializeMiddleware
 }
 
 func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input *dynamodb.BatchGetItemInput, in middleware.InitializeInput, next middleware.InitializeHandler) (middleware.InitializeOutput, error) {
+	fmt.Printf("input: %+v\n\n", input)
 	responsesToReturn := make(map[string][]map[string]types.AttributeValue)
-	// for now any cache miss is considered a miss for the whole batch
-	gotMiss := false
+
+	// holds RequestItems that were cache misses
+	//momentoMisses := make(map[string]types.KeysAndAttributes)
+
 	// this holds the query keys for each DDB table in the request and is used to compute the cache key for
 	// cache set operations
 	tableToDdbKeys := make(map[string][]string)
 	// this holds the computed Momento cache keys for each item in the request, per table
 	tableToCacheKeys := make(map[string][]momento.Key)
+	cacheMissesPerTable := make(map[string]int)
 
 	// gather cache keys for batch get from Momento cache
 	for tableName, keys := range input.RequestItems {
@@ -109,6 +113,9 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 		}
 	}
 
+	gotMiss := false
+	gotHit := false
+
 	// Batch get from Momento cache and gather response data
 	for tableName := range tableToCacheKeys {
 		getResp, err := d.momentoClient.GetBatch(ctx, &momento.GetBatchRequest{
@@ -124,22 +131,28 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 			for _, element := range r.Results() {
 				switch e := element.(type) {
 				case *responses.GetHit:
+					gotHit = true
 					marshalMap, err := GetMarshalMap(e)
 					if err != nil {
 						return middleware.InitializeOutput{}, fmt.Errorf("error with marshal map: %w", err)
 					}
 					responsesToReturn[tableName] = append(responsesToReturn[tableName], marshalMap)
 				case *responses.GetMiss:
+					if _, ok := cacheMissesPerTable[tableName]; !ok {
+						cacheMissesPerTable[tableName] = 0
+					}
+					cacheMissesPerTable[tableName]++
 					gotMiss = true
-				}
-				if gotMiss {
-					break
+					responsesToReturn[tableName] = append(responsesToReturn[tableName], nil)
 				}
 			}
 		}
+		if cacheMissesPerTable[tableName] > 0 {
+			d.momentoClient.Logger().Debug(fmt.Sprintf("got %d misses for table '%s'", cacheMissesPerTable[tableName], tableName))
+		}
 	}
 
-	// If we didn't get a miss, return the responses
+	// If we didn't get any misses, we return the entire response from the cache
 	if !gotMiss {
 		d.momentoClient.Logger().Debug("returning cached batch get responses")
 		return middleware.InitializeOutput{
@@ -149,13 +162,64 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 		}, nil
 	}
 
-	d.momentoClient.Logger().Debug("returning DynamoDB response")
-	// On MISS Let middleware chains continue, so we can get result and try to cache it
+	// We got some misses, so there's still work for DDB to do
+	var newDdbRequest *dynamodb.BatchGetItemInput
+	if !gotHit {
+		// We didn't get any cache hits, so the new request is the old request
+		newDdbRequest = input
+	} else {
+		// compose a new DDB request with only the cache misses
+		newDdbRequest = &dynamodb.BatchGetItemInput{
+			RequestItems: map[string]types.KeysAndAttributes{},
+		}
+		for tableName, keys := range responsesToReturn {
+			if _, ok := newDdbRequest.RequestItems[tableName]; !ok {
+				newDdbRequest.RequestItems[tableName] = types.KeysAndAttributes{
+					Keys: make([]map[string]types.AttributeValue, cacheMissesPerTable[tableName]),
+				}
+			}
+			missIdx := 0
+			for idx, key := range keys {
+				if key == nil {
+					newDdbRequest.RequestItems[tableName].Keys[missIdx] = input.RequestItems[tableName].Keys[idx]
+					missIdx++
+				}
+			}
+		}
+	}
+
+	// re-issue the DDB request with only the cache misses
+	d.momentoClient.Logger().Debug("requesting items from DynamoDB")
+	in.Parameters = newDdbRequest
 	out, _, err := next.HandleInitialize(ctx, in)
 
+	var toReturn middleware.InitializeOutput
 	if err == nil {
 		switch o := out.Result.(type) {
 		case *dynamodb.BatchGetItemOutput:
+			// check DDB responses and stitch them in with the cache responses
+			// if we got all misses, we can just return the DDB response after caching it
+			if !gotHit {
+				toReturn = out
+			} else {
+				for tableName, items := range responsesToReturn {
+					ddbResponseIdx := 0
+					for idx, item := range items {
+						if item == nil {
+							responsesToReturn[tableName][idx] = o.Responses[tableName][ddbResponseIdx]
+							ddbResponseIdx++
+						}
+					}
+				}
+				toReturn = middleware.InitializeOutput{
+					Result: &dynamodb.BatchGetItemOutput{
+						Responses: responsesToReturn,
+					},
+				}
+			}
+
+			// Below should happen as a goroutine, and we can return "toReturn" immediately.
+			// We'll log errors, but they won't be surfaced to the user.
 			var itemsToSet []momento.BatchSetItem
 			// compute and gather keys and JSON encoded items to store in Momento cache
 			for tableName, items := range o.Responses {
@@ -196,7 +260,7 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 	}
 
 	// unsupported output just return output and dont do anything
-	return out, err
+	return toReturn, err
 }
 
 func (d *cachingMiddleware) handleGetItemCommand(ctx context.Context, input *dynamodb.GetItemInput, in middleware.InitializeInput, next middleware.InitializeHandler) (middleware.InitializeOutput, error) {
