@@ -228,6 +228,7 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 						j, err := MarshalToJson(item, d.momentoClient.Logger())
 						if err != nil {
 							d.momentoClient.Logger().Warn(fmt.Sprintf("error marshalling item to json: %+v", err))
+							continue
 						}
 
 						// extract the keys from the item to compute the hash key
