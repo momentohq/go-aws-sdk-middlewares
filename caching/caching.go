@@ -71,8 +71,7 @@ func NewCachingMiddleware(mw *cachingMiddleware) middleware.InitializeMiddleware
 
 func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input *dynamodb.BatchGetItemInput, in middleware.InitializeInput, next middleware.InitializeHandler) (middleware.InitializeOutput, error) {
 	if len(input.RequestItems) > 100 {
-		out, _, err := next.HandleInitialize(ctx, in)
-		return out, err
+		return middleware.InitializeOutput{}, errors.New("request items exceeded maximum of 100")
 	}
 	// we gather all responses from both backends in this variable to return to the user as a DDB response
 	responsesToReturn := make(map[string][]map[string]types.AttributeValue)
