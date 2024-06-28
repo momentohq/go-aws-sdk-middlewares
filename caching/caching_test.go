@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/google/uuid"
 	"github.com/momentohq/client-sdk-go/auth"
 	"github.com/momentohq/client-sdk-go/config"
 	"github.com/momentohq/client-sdk-go/config/logger"
@@ -39,18 +40,19 @@ var (
 	momentoClient  momento.CacheClient
 	ddbClient      *dynamodb.Client
 	tableInfo      TableBasics
-	tableName      = "movies"
+	tableName      string
 	movies         []Movie
 	movie1         Movie
 	movie2         Movie
-	movie1hash     = "1e21f0974977886cb33d2ca173f89cb9c3c1c5e84712ee07d3fab031817751f2"
-	movie2hash     = "f334e26f2f40da3172e2dd668a18c58b95b2472a8891ea5a0c63d67ed57c6660"
+	movie1hash     string
+	movie2hash     string
 	movie1json2022 = "{\"info\":null,\"title\":\"A Movie Part 1\",\"year\":2022}"
 	movie2json2022 = "{\"info\":null,\"title\":\"A Movie Part 2\",\"year\":2022}"
 	writebackType  = SYNCHRONOUS
 )
 
 func setupTest() func() {
+	tableName = fmt.Sprintf("movies-%s", uuid.NewString())
 	credProvider, err := auth.NewEnvMomentoTokenProvider("MOMENTO_API_KEY")
 	if err != nil {
 		panic(err)
@@ -102,6 +104,14 @@ func setupTest() func() {
 
 	movie1 = movies[0]
 	movie2 = movies[1]
+	movie1hash, err = ComputeCacheKey(tableName, movie1.getKey())
+	if err != nil {
+		panic(err)
+	}
+	movie2hash, err = ComputeCacheKey(tableName, movie2.getKey())
+	if err != nil {
+		panic(err)
+	}
 
 	// teardown function
 	return func() {
