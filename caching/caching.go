@@ -20,17 +20,38 @@ import (
 	"github.com/momentohq/client-sdk-go/responses"
 )
 
+type WritebackType string
+
+const (
+	SYNCHRONOUS  WritebackType = "SYNCHRONOUS"
+	ASYNCHRONOUS WritebackType = "ASYNCHRONOUS"
+	DISABLED     WritebackType = "DISABLED"
+)
+
 type cachingMiddleware struct {
 	cacheName     string
 	momentoClient momento.CacheClient
+	writebackType WritebackType
 }
 
-func AttachNewCachingMiddleware(cfg *aws.Config, cacheName string, client momento.CacheClient) {
-	cfg.APIOptions = append(cfg.APIOptions, func(stack *middleware.Stack) error {
+type MiddlewareProps struct {
+	AwsConfig     *aws.Config
+	CacheName     string
+	MomentoClient momento.CacheClient
+	WritebackType WritebackType
+}
+
+func AttachNewCachingMiddleware(props MiddlewareProps) {
+	if props.WritebackType == "" {
+		props.WritebackType = SYNCHRONOUS
+	}
+	props.MomentoClient.Logger().Debug("attaching Momento caching middleware with writeback type " + string(props.WritebackType))
+	props.AwsConfig.APIOptions = append(props.AwsConfig.APIOptions, func(stack *middleware.Stack) error {
 		return stack.Initialize.Add(
 			NewCachingMiddleware(&cachingMiddleware{
-				cacheName:     cacheName,
-				momentoClient: client,
+				cacheName:     props.CacheName,
+				momentoClient: props.MomentoClient,
+				writebackType: props.WritebackType,
 			}),
 			middleware.Before,
 		)
@@ -84,7 +105,6 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 
 	// gather cache keys for batch get from Momento cache
 	for tableName, keys := range input.RequestItems {
-		// TODO: it may be preferable/safer to query the table for the keys
 		gatherKeys := false
 		if tableToDdbKeys[tableName] == nil {
 			tableToDdbKeys[tableName] = []string{}
@@ -137,11 +157,11 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 					}
 					responsesToReturn[tableName] = append(responsesToReturn[tableName], marshalMap)
 				case *responses.GetMiss:
+					gotMiss = true
 					if _, ok := cacheMissesPerTable[tableName]; !ok {
 						cacheMissesPerTable[tableName] = 0
 					}
 					cacheMissesPerTable[tableName]++
-					gotMiss = true
 					responsesToReturn[tableName] = append(responsesToReturn[tableName], nil)
 				}
 			}
@@ -219,130 +239,142 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 				}
 			}
 
-			go func() {
-				d.momentoClient.Logger().Debug("storing dynamodb items in cache")
-				var itemsToSet []momento.BatchSetItem
-				// compute and gather keys and JSON encoded items to store in Momento cache
-				for tableName, items := range o.Responses {
-					for _, item := range items {
-						j, err := MarshalToJson(item, d.momentoClient.Logger())
-						if err != nil {
-							d.momentoClient.Logger().Warn(fmt.Sprintf("error marshalling item to json: %+v", err))
-							continue
-						}
+			if d.writebackType == SYNCHRONOUS {
+				d.writeBatchResultsToCache(ctx, o, tableToDdbKeys)
+			} else if d.writebackType == ASYNCHRONOUS {
+				go d.writeBatchResultsToCache(ctx, o, tableToDdbKeys)
+			}
 
-						// extract the keys from the item to compute the hash key
-						itemForKey := map[string]types.AttributeValue{}
-						for _, key := range tableToDdbKeys[tableName] {
-							itemForKey[key] = item[key]
-						}
-						cacheKey, err := ComputeCacheKey(tableName, itemForKey)
-						if err != nil {
-							d.momentoClient.Logger().Warn(fmt.Sprintf("error getting key for caching: %+v", err))
-							continue
-						}
-						d.momentoClient.Logger().Debug("computed cache key for batch get storage: %s", cacheKey)
-
-						itemsToSet = append(itemsToSet, momento.BatchSetItem{
-							Key:   momento.String(cacheKey),
-							Value: momento.Bytes(j),
-						})
-					}
-				}
-				// set item batch in Momento cache
-				_, err = d.momentoClient.SetBatch(ctx, &momento.SetBatchRequest{
-					CacheName: d.cacheName,
-					Items:     itemsToSet,
-				})
-				if err != nil {
-					d.momentoClient.Logger().Warn(
-						fmt.Sprintf("error storing item batch in cache err=%+v", err),
-					)
-				}
-				d.momentoClient.Logger().Debug("stored dynamodb items in cache")
-			}()
 		}
 	}
 
-	// unsupported output just return output and dont do anything
 	return toReturn, err
 }
 
 func (d *cachingMiddleware) handleGetItemCommand(ctx context.Context, input *dynamodb.GetItemInput, in middleware.InitializeInput, next middleware.InitializeHandler) (middleware.InitializeOutput, error) {
-
-	// Derive a cache key from DDB request
+	if input.ConsistentRead != nil {
+		return middleware.InitializeOutput{}, errors.New("consistent read not supported with caching middleware")
+	}
 	if input.TableName == nil {
 		return middleware.InitializeOutput{}, errors.New("error table name not set on get-item request")
 	}
+
+	// Derive a cache key from DDB request
 	cacheKey, err := ComputeCacheKey(*input.TableName, input.Key)
 	if err != nil {
 		return middleware.InitializeOutput{}, fmt.Errorf("error getting key for caching: %w", err)
 	}
 	d.momentoClient.Logger().Debug("computed cache key for item retrieval: %s", cacheKey)
 
-	// Make sure we don't cache when trying to do a consistent read
-	if input.ConsistentRead == nil {
-		// Try to look up value in momento
-		rsp, err := d.momentoClient.Get(ctx, &momento.GetRequest{
-			CacheName: d.cacheName,
-			Key:       momento.String(cacheKey),
-		})
-		if err == nil {
-			switch r := rsp.(type) {
-			case *responses.GetHit:
-				// On hit decode value from stored json to DDB attribute map
-				marshalMap, err := GetMarshalMap(r)
-				if err != nil {
-					return middleware.InitializeOutput{}, fmt.Errorf("error with marshal map: %w", err)
-				}
-				d.momentoClient.Logger().Debug("returning cached item")
-				// Return user spoofed dynamodb.GetItemOutput.Item w/ cached value
-				return struct{ Result interface{} }{Result: &dynamodb.GetItemOutput{
-					Item: marshalMap,
-				}}, nil
-
-			case *responses.GetMiss:
-				// Just log on miss
-				d.momentoClient.Logger().Debug("momento lookup did not find key: " + cacheKey)
+	// Try to look up value in momento
+	rsp, err := d.momentoClient.Get(ctx, &momento.GetRequest{
+		CacheName: d.cacheName,
+		Key:       momento.String(cacheKey),
+	})
+	if err == nil {
+		switch r := rsp.(type) {
+		case *responses.GetHit:
+			// On hit decode value from stored json to DDB attribute map
+			marshalMap, err := GetMarshalMap(r)
+			if err != nil {
+				return middleware.InitializeOutput{}, fmt.Errorf("error with marshal map: %w", err)
 			}
-		} else {
-			d.momentoClient.Logger().Warn(
-				fmt.Sprintf("error looking up item in cache err=%+v", err),
-			)
+			d.momentoClient.Logger().Debug("returning cached item")
+			// Return user spoofed dynamodb.GetItemOutput.Item w/ cached value
+			return struct{ Result interface{} }{Result: &dynamodb.GetItemOutput{
+				Item: marshalMap,
+			}}, nil
+
+		case *responses.GetMiss:
+			// Just log on miss
+			d.momentoClient.Logger().Debug("momento lookup did not find key: " + cacheKey)
 		}
+	} else {
+		d.momentoClient.Logger().Warn(
+			fmt.Sprintf("error looking up item in cache err=%+v", err),
+		)
 	}
 
 	d.momentoClient.Logger().Debug("returning DynamoDB response")
 	// On MISS Let middleware chains continue, so we can get result and try to cache it
 	out, _, err := next.HandleInitialize(ctx, in)
 
-	if err == nil {
+	if err == nil && d.writebackType != DISABLED {
 		switch o := out.Result.(type) {
 		case *dynamodb.GetItemOutput:
-
-			// unmarshal raw response object to DDB attribute values map and encode as json
-			j, err := MarshalToJson(o.Item, d.momentoClient.Logger())
-			if err != nil {
-				return out, err // don't return error
-			}
-
-			d.momentoClient.Logger().Debug("caching item with key %s: " + cacheKey)
-			// set item in momento cache
-			_, err = d.momentoClient.Set(ctx, &momento.SetRequest{
-				CacheName: d.cacheName,
-				Key:       momento.String(cacheKey),
-				Value:     momento.Bytes(j),
-			})
-			if err != nil {
-				d.momentoClient.Logger().Warn(
-					fmt.Sprintf("error storing item in cache err=%+v", err),
-				)
-				return out, nil // don't return err
+			if d.writebackType == SYNCHRONOUS {
+				d.writeResultToCache(ctx, o, cacheKey)
+			} else if d.writebackType == ASYNCHRONOUS {
+				go d.writeResultToCache(ctx, o, cacheKey)
 			}
 		}
 	}
-
 	return out, err
+}
+
+func (d *cachingMiddleware) writeResultToCache(ctx context.Context, ddbOutput *dynamodb.GetItemOutput, cacheKey string) {
+	// unmarshal raw response object to DDB attribute values map and encode as json
+	j, err := MarshalToJson(ddbOutput.Item, d.momentoClient.Logger())
+	if err != nil {
+		d.momentoClient.Logger().Warn(fmt.Sprintf("error marshalling item to json: %+v", err))
+	}
+
+	d.momentoClient.Logger().Debug(fmt.Sprintf("caching item with key: %s", cacheKey))
+	// set item in momento cache
+	_, err = d.momentoClient.Set(ctx, &momento.SetRequest{
+		CacheName: d.cacheName,
+		Key:       momento.String(cacheKey),
+		Value:     momento.Bytes(j),
+	})
+	if err != nil {
+		d.momentoClient.Logger().Warn(
+			fmt.Sprintf("error storing item in cache err=%+v", err),
+		)
+	}
+}
+
+func (d *cachingMiddleware) writeBatchResultsToCache(ctx context.Context, ddbOutput *dynamodb.BatchGetItemOutput, tableToDdbKeys map[string][]string) {
+	d.momentoClient.Logger().Debug("storing dynamodb items in cache")
+	var itemsToSet []momento.BatchSetItem
+	// compute and gather keys and JSON encoded items to store in Momento cache
+	for tableName, items := range ddbOutput.Responses {
+		for _, item := range items {
+			j, err := MarshalToJson(item, d.momentoClient.Logger())
+			if err != nil {
+				d.momentoClient.Logger().Warn(fmt.Sprintf("error marshalling item to json: %+v", err))
+				continue
+			}
+
+			// extract the keys from the item to compute the hash key
+			itemForKey := map[string]types.AttributeValue{}
+			for _, key := range tableToDdbKeys[tableName] {
+				itemForKey[key] = item[key]
+			}
+			cacheKey, err := ComputeCacheKey(tableName, itemForKey)
+			if err != nil {
+				d.momentoClient.Logger().Warn(fmt.Sprintf("error getting key for caching: %+v", err))
+				continue
+			}
+			d.momentoClient.Logger().Debug("computed cache key for batch get storage: %s", cacheKey)
+
+			itemsToSet = append(itemsToSet, momento.BatchSetItem{
+				Key:   momento.String(cacheKey),
+				Value: momento.Bytes(j),
+			})
+		}
+	}
+	// set item batch in Momento cache
+	_, err := d.momentoClient.SetBatch(ctx, &momento.SetBatchRequest{
+		CacheName: d.cacheName,
+		Items:     itemsToSet,
+	})
+	if err != nil {
+		d.momentoClient.Logger().Warn(
+			fmt.Sprintf("error storing item batch in cache err=%+v", err),
+		)
+	}
+	d.momentoClient.Logger().Debug("stored dynamodb items in cache")
+
 }
 
 func ComputeCacheKey(tableName string, keys map[string]types.AttributeValue) (string, error) {

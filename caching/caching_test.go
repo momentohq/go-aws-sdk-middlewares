@@ -47,6 +47,7 @@ var (
 	movie2hash     = "f334e26f2f40da3172e2dd668a18c58b95b2472a8891ea5a0c63d67ed57c6660"
 	movie1json2022 = "{\"info\":null,\"title\":\"A Movie Part 1\",\"year\":2022}"
 	movie2json2022 = "{\"info\":null,\"title\":\"A Movie Part 2\",\"year\":2022}"
+	writebackType  = SYNCHRONOUS
 )
 
 func setupTest() func() {
@@ -70,7 +71,11 @@ func setupTest() func() {
 	if err != nil {
 		panic(err)
 	}
-	ddbClient = getDdbClientWithMiddleware(momentoClient)
+
+	// writebackType defaults to synchronous but can be modified before calling `setupTest()`
+	// you may also instantiate additional clients to test, passing different values for writebackType
+	// to `getDdbClientWithMiddleware()`
+	ddbClient = getDdbClientWithMiddleware(momentoClient, &writebackType)
 
 	amazonConfig := mustGetAWSConfig()
 	ddbControlClient := dynamodb.NewFromConfig(amazonConfig)
@@ -108,12 +113,12 @@ func setupTest() func() {
 			panic(err)
 		}
 		momentoClient.Close()
+		writebackType = SYNCHRONOUS
 	}
 }
 
-func TestGetItemCacheMiss(t *testing.T) {
-	defer setupTest()()
-
+// cache miss tests
+func testGetItemCacheMissCommon(t *testing.T) (Movie, responses.GetResponse) {
 	// Execute GetItem Request as you would normally
 	resp, err := ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
 		TableName: aws.String(tableName),
@@ -128,6 +133,7 @@ func TestGetItemCacheMiss(t *testing.T) {
 		t.Errorf("error decoding dynamodb response: %+v", err)
 	}
 
+	time.Sleep(1 * time.Second)
 	getResp, err := momentoClient.Get(context.Background(), &momento.GetRequest{
 		CacheName: tableName,
 		Key:       momento.String(movie1hash),
@@ -135,6 +141,13 @@ func TestGetItemCacheMiss(t *testing.T) {
 	if err != nil {
 		t.Errorf("error occured calling momento get: %+v", err)
 	}
+	return movie, getResp
+}
+
+func TestGetItemCacheMiss(t *testing.T) {
+	defer setupTest()()
+
+	movie, getResp := testGetItemCacheMissCommon(t)
 	switch r := getResp.(type) {
 	case *responses.GetHit:
 		movieInfo, err := getMapFromJsonBytes(r.ValueByte())
@@ -152,7 +165,28 @@ func TestGetItemCacheMiss(t *testing.T) {
 	}
 }
 
-func TestGetItemHit(t *testing.T) {
+func TestGetItemCacheMissAsync(t *testing.T) {
+	writebackType = ASYNCHRONOUS
+	TestGetItemCacheMiss(t)
+}
+
+func TestGetItemCacheMissNoWriteback(t *testing.T) {
+	writebackType = DISABLED
+	defer setupTest()()
+	_, getResp := testGetItemCacheMissCommon(t)
+	switch getResp.(type) {
+	case *responses.GetHit:
+		t.Errorf("expected cache miss, got cache hit")
+	}
+}
+
+// cache hit tests
+func TestGetItemCacheHitAsync(t *testing.T) {
+	writebackType = ASYNCHRONOUS
+	TestGetItemCacheHit(t)
+}
+
+func TestGetItemCacheHit(t *testing.T) {
 	defer setupTest()()
 
 	_, err := momentoClient.Set(context.Background(), &momento.SetRequest{
@@ -183,10 +217,11 @@ func TestGetItemHit(t *testing.T) {
 	}
 }
 
+// cache error test
 func TestGetItemError(t *testing.T) {
 	defer setupTest()()
 	mmc := &mockMomentoClient{}
-	ddbClient := getDdbClientWithMiddleware(mmc)
+	ddbClient := getDdbClientWithMiddleware(mmc, nil)
 
 	// Execute GetItem Request as you would normally
 	resp, err := ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
@@ -197,7 +232,6 @@ func TestGetItemError(t *testing.T) {
 		t.Errorf("error occured calling get item: %+v", err)
 	}
 
-	fmt.Printf("get item resp: %+v\n", resp)
 	movie, err := getMovieFromDdbItem(resp.Item)
 	if err != nil {
 		t.Errorf("error decoding dynamodb response: %+v", err)
@@ -208,6 +242,7 @@ func TestGetItemError(t *testing.T) {
 	}
 }
 
+// batch get tests - hits
 func TestBatchGetItemAllHits(t *testing.T) {
 	defer setupTest()()
 
@@ -255,7 +290,13 @@ func TestBatchGetItemAllHits(t *testing.T) {
 	}
 }
 
-func TestBatchGetItemAllMisses(t *testing.T) {
+func TestBatchGetItemAllHitsAsync(t *testing.T) {
+	writebackType = ASYNCHRONOUS
+	TestBatchGetItemAllHits(t)
+}
+
+// batch get tests - misses
+func testBatchGetItemAllMissesCommon(t *testing.T) responses.GetBatchResponse {
 	defer setupTest()()
 
 	req := &dynamodb.BatchGetItemInput{
@@ -285,7 +326,7 @@ func TestBatchGetItemAllMisses(t *testing.T) {
 	}
 
 	// give the middleware goroutine a little time to finish caching DDB data for the Momento misses
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(1 * time.Second)
 
 	// make sure results were set in Momento cache
 	getResp, err := momentoClient.GetBatch(context.Background(), &momento.GetBatchRequest{
@@ -298,7 +339,11 @@ func TestBatchGetItemAllMisses(t *testing.T) {
 	if err != nil {
 		t.Errorf("error occured calling momento get: %+v", err)
 	}
+	return getResp
+}
 
+func TestBatchGetItemAllMisses(t *testing.T) {
+	getResp := testBatchGetItemAllMissesCommon(t)
 	switch r := getResp.(type) {
 	case responses.GetBatchSuccess:
 		for _, element := range r.Results() {
@@ -320,9 +365,29 @@ func TestBatchGetItemAllMisses(t *testing.T) {
 	}
 }
 
-func TestBatchGetItemsMixed(t *testing.T) {
-	defer setupTest()()
+func TestBatchGetItemAllMissesAsync(t *testing.T) {
+	writebackType = ASYNCHRONOUS
+	TestBatchGetItemAllMisses(t)
+}
 
+func TestBatchGetItemAllMissesNoWriteback(t *testing.T) {
+	writebackType = DISABLED
+	getResp := testBatchGetItemAllMissesCommon(t)
+	switch r := getResp.(type) {
+	case responses.GetBatchSuccess:
+		for _, element := range r.Results() {
+			switch element.(type) {
+			case *responses.GetHit:
+				t.Errorf("expected cache hit, got cache miss")
+			}
+		}
+	default:
+		t.Errorf("unknown get batch response type: %T\n", r)
+	}
+}
+
+// batch get tests - mixed hits and misses
+func testBatchGetItemsMixedCommon(t *testing.T) responses.GetBatchResponse {
 	_, err := momentoClient.Set(context.Background(), &momento.SetRequest{
 		CacheName: tableName,
 		Key:       momento.String(movie1hash),
@@ -342,6 +407,7 @@ func TestBatchGetItemsMixed(t *testing.T) {
 			},
 		},
 	}
+	time.Sleep(1 * time.Second)
 	resp, err := ddbClient.BatchGetItem(context.TODO(), req)
 	if err != nil {
 		t.Errorf("error occurred calling batch get item: %+v\n", err)
@@ -376,7 +442,12 @@ func TestBatchGetItemsMixed(t *testing.T) {
 	if err != nil {
 		t.Errorf("error occured calling momento get: %+v", err)
 	}
+	return getResp
+}
 
+func TestBatchGetItemsMixed(t *testing.T) {
+	defer setupTest()()
+	getResp := testBatchGetItemsMixedCommon(t)
 	switch r := getResp.(type) {
 	case responses.GetBatchSuccess:
 		for _, element := range r.Results() {
@@ -399,10 +470,37 @@ func TestBatchGetItemsMixed(t *testing.T) {
 	}
 }
 
+func TestBatchGetItemsMixedAsync(t *testing.T) {
+	writebackType = ASYNCHRONOUS
+	TestBatchGetItemsMixed(t)
+}
+
+func TestBatchGetItemsMixedNoWriteback(t *testing.T) {
+	writebackType = DISABLED
+	defer setupTest()()
+	getResp := testBatchGetItemsMixedCommon(t)
+	switch r := getResp.(type) {
+	case responses.GetBatchSuccess:
+		for _, element := range r.Results() {
+			switch e := element.(type) {
+			case *responses.GetHit:
+				movieInfo, err := getMapFromJsonBytes(e.ValueByte())
+				if err != nil {
+					t.Errorf("error decoding cache hit: %+v", err)
+				}
+				if movieInfo["title"] != "A Movie Part 1" {
+					t.Errorf("expected cache miss but got: %+v", movieInfo)
+				}
+			}
+		}
+	}
+}
+
+// batch get test with error
 func TestBatchGetItemsError(t *testing.T) {
 	defer setupTest()()
 	mmc := &mockMomentoClient{}
-	ddbClient := getDdbClientWithMiddleware(mmc)
+	ddbClient := getDdbClientWithMiddleware(mmc, nil)
 
 	req := &dynamodb.BatchGetItemInput{
 		RequestItems: map[string]types.KeysAndAttributes{
@@ -488,9 +586,18 @@ func getMovieFromDdbItem(item map[string]types.AttributeValue) (Movie, error) {
 	return movie, nil
 }
 
-func getDdbClientWithMiddleware(momentoClient momento.CacheClient) *dynamodb.Client {
+func getDdbClientWithMiddleware(momentoClient momento.CacheClient, writebackType *WritebackType) *dynamodb.Client {
 	amazonConfiguration := mustGetAWSConfig()
-	AttachNewCachingMiddleware(&amazonConfiguration, tableName, momentoClient)
+	var wb WritebackType
+	if writebackType != nil {
+		wb = *writebackType
+	}
+	AttachNewCachingMiddleware(MiddlewareProps{
+		&amazonConfiguration,
+		tableName,
+		momentoClient,
+		wb,
+	})
 	return dynamodb.NewFromConfig(amazonConfiguration)
 }
 
