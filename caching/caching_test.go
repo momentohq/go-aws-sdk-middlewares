@@ -36,22 +36,18 @@ type Movie struct {
 }
 
 var (
-	momentoClient momento.CacheClient
-	ddbClient     *dynamodb.Client
-	tableInfo     TableBasics
-	tableName     = "movies"
-	movie1        = Movie{
-		Title: "A Movie Part 1",
-		Year:  2021,
-	}
-	movie2 = Movie{
-		Title: "A Movie Part 2",
-		Year:  2021,
-	}
+	momentoClient  momento.CacheClient
+	ddbClient      *dynamodb.Client
+	tableInfo      TableBasics
+	tableName      = "movies"
+	movies         []Movie
+	movie1         Movie
+	movie2         Movie
 	movie1hash     = "1e21f0974977886cb33d2ca173f89cb9c3c1c5e84712ee07d3fab031817751f2"
 	movie2hash     = "f334e26f2f40da3172e2dd668a18c58b95b2472a8891ea5a0c63d67ed57c6660"
 	movie1json2022 = "{\"info\":null,\"title\":\"A Movie Part 1\",\"year\":2022}"
 	movie2json2022 = "{\"info\":null,\"title\":\"A Movie Part 2\",\"year\":2022}"
+	isFirstTest    = true
 )
 
 func setupTest() func() {
@@ -81,19 +77,27 @@ func setupTest() func() {
 	ddbControlClient := dynamodb.NewFromConfig(amazonConfig)
 	tableInfo = TableBasics{DynamoDbClient: ddbControlClient, TableName: tableName}
 
+	momentoClient.Logger().Debug("Populating DDB with movies")
 	_, err = tableInfo.createTestTable()
 	if err != nil {
 		panic(err)
 	}
-	for i := 0; i < 20; i++ {
-		err = tableInfo.addMovie(Movie{
-			Title: "A Movie Part " + fmt.Sprint(i),
+	// insert movies in DDB with year = 2021
+	for i := 0; i < 50; i++ {
+		movie := Movie{
+			Title: "A Movie Part " + fmt.Sprint(i+1),
 			Year:  2021,
-		})
+		}
+		err = tableInfo.addMovie(movie)
 		if err != nil {
 			panic(fmt.Errorf("error adding data: %+v", err))
 		}
+		movies = append(movies, movie)
 	}
+	momentoClient.Logger().Debug("done populating data")
+
+	movie1 = movies[0]
+	movie2 = movies[1]
 
 	// teardown function
 	return func() {
@@ -194,10 +198,12 @@ func TestGetItemError(t *testing.T) {
 		t.Errorf("error occured calling get item: %+v", err)
 	}
 
+	fmt.Printf("get item resp: %+v\n", resp)
 	movie, err := getMovieFromDdbItem(resp.Item)
 	if err != nil {
 		t.Errorf("error decoding dynamodb response: %+v", err)
 	}
+	momentoClient.Logger().Debug(fmt.Sprintf("movie: %+v", movie))
 	if movie.Year != 2021 {
 		t.Errorf("expected ddb hit year to be 2021: %+v", movie)
 	}
@@ -279,6 +285,9 @@ func TestBatchGetItemAllMisses(t *testing.T) {
 		}
 	}
 
+	// give the middleware goroutine a little time to finish caching DDB data for the Momento misses
+	time.Sleep(500 * time.Millisecond)
+
 	// make sure results were set in Momento cache
 	getResp, err := momentoClient.GetBatch(context.Background(), &momento.GetBatchRequest{
 		CacheName: tableName,
@@ -338,10 +347,10 @@ func TestBatchGetItemsMixed(t *testing.T) {
 	if err != nil {
 		t.Errorf("error occurred calling batch get item: %+v\n", err)
 	}
+
 	for _, items := range resp.Responses {
 		for _, item := range items {
 			movie, err := getMovieFromDdbItem(item)
-			fmt.Printf("movie: %+v\n", movie)
 			if err != nil {
 				t.Errorf("error decoding dynamodb response: %+v", err)
 			}
@@ -354,6 +363,9 @@ func TestBatchGetItemsMixed(t *testing.T) {
 		}
 	}
 
+	// give the middleware goroutine a little time to finish caching DDB data for the Momento misses
+	time.Sleep(500 * time.Millisecond)
+
 	// make sure cached versions were overwritten/written
 	getResp, err := momentoClient.GetBatch(context.Background(), &momento.GetBatchRequest{
 		CacheName: tableName,
@@ -365,6 +377,7 @@ func TestBatchGetItemsMixed(t *testing.T) {
 	if err != nil {
 		t.Errorf("error occured calling momento get: %+v", err)
 	}
+
 	switch r := getResp.(type) {
 	case responses.GetBatchSuccess:
 		for _, element := range r.Results() {
