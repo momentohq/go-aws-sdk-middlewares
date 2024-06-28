@@ -31,6 +31,12 @@ jobs:
     env:
       MOMENTO_API_KEY: ${{ secrets.ALPHA_TEST_AUTH_TOKEN }}
     steps:
+      - name: Setup DynamoDB Local
+        uses: rrainn/dynamodb-action@v4.0.0
+        with:
+          port: 8000
+          cors: '*'
+
       - name: Setup repo
         uses: actions/checkout@v3
 
