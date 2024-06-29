@@ -286,7 +286,7 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 			if d.writebackType == SYNCHRONOUS {
 				d.writeBatchResultsToCache(ctx, o, tableToDdbKeys)
 			} else if d.writebackType == ASYNCHRONOUS {
-				d.writeBatchResultsToCache(ctx, o, tableToDdbKeys)
+				d.writeBatchResultsToAsyncChannel(o, tableToDdbKeys)
 			}
 
 		}
