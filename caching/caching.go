@@ -373,8 +373,7 @@ func (d *cachingMiddleware) writeBatchResultsToCache(ctx context.Context, ddbOut
 			fmt.Sprintf("error storing item batch in cache err=%+v", err),
 		)
 	}
-	d.momentoClient.Logger().Debug("stored dynamodb items in cache")
-
+	d.momentoClient.Logger().Debug(fmt.Sprintf("stored dynamodb items in cache %s", d.cacheName))
 }
 
 func ComputeCacheKey(tableName string, keys map[string]types.AttributeValue) (string, error) {
