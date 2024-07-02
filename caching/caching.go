@@ -95,7 +95,7 @@ func NewCachingMiddleware(mw *cachingMiddleware) middleware.InitializeMiddleware
 }
 
 func (d *cachingMiddleware) startAsyncBatchWriter() {
-	const maxBufferSize = 10000 // TODO think about this number. Should we make configurable or larger/smaller?
+	const maxBufferSize = 100 // Should we make configurable or larger/smaller?
 	batchWriteChan := make(chan *momento.SetBatchRequest, maxBufferSize)
 
 	d.asyncWriteChan = batchWriteChan
