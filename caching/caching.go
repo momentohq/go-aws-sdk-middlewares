@@ -267,18 +267,29 @@ func (d *cachingMiddleware) handleBatchGetItemCommand(ctx context.Context, input
 				// if we got all misses, we can just return the DDB response after caching it
 				toReturn = out
 			} else {
+				// Loop through tables we expect responses from
 				for tableName, items := range responsesToReturn {
 					ddbResponseIdx := 0
 					for idx, item := range items {
+						// If we had a cache miss then try to grab item from DDB output
 						if item == nil {
-							responsesToReturn[tableName][idx] = o.Responses[tableName][ddbResponseIdx]
-							ddbResponseIdx++
+							// Ensure we actually have item in response in case DDB had
+							// error on those keys, and we didn't get an item back
+							if o.Responses[tableName] != nil {
+								if value, ok := safeGetDDItemFromResponseSlice(o.Responses[tableName], ddbResponseIdx); ok {
+									responsesToReturn[tableName][idx] = value
+									ddbResponseIdx++
+								}
+							}
 						}
 					}
 				}
 				toReturn = middleware.InitializeOutput{
 					Result: &dynamodb.BatchGetItemOutput{
-						Responses: responsesToReturn,
+						ConsumedCapacity: o.ConsumedCapacity,
+						Responses:        responsesToReturn,
+						UnprocessedKeys:  o.UnprocessedKeys,
+						ResultMetadata:   middleware.Metadata{},
 					},
 				}
 			}
@@ -492,4 +503,12 @@ func MarshalToJson(item map[string]types.AttributeValue, logger logger.MomentoLo
 		return nil, fmt.Errorf("error json encoding new item to store in cache err=%+v", err)
 	}
 	return j, nil
+}
+
+// safeGetDDItemFromResponseSlice safely checks the slice of DDB item responses to avoid a panic
+func safeGetDDItemFromResponseSlice(slice []map[string]types.AttributeValue, index int) (map[string]types.AttributeValue, bool) {
+	if index >= 0 && index < len(slice) {
+		return slice[index], true
+	}
+	return nil, false
 }
