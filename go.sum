@@ -46,8 +46,8 @@ github.com/jmespath/go-jmespath v0.4.0 h1:BEgLn5cpjn8UN1mAw4NjwDrS35OdebyEtFe+9Y
 github.com/jmespath/go-jmespath v0.4.0/go.mod h1:T8mJZnbsbmF+m6zOOFylbeCJqk5+pHWvzYPziyZiYoo=
 github.com/jmespath/go-jmespath/internal/testify v1.5.1 h1:shLQSRRSCCPj3f2gpwzGwWFoC7ycTf1rcQZHOlsJ6N8=
 github.com/jmespath/go-jmespath/internal/testify v1.5.1/go.mod h1:L3OGu8Wl2/fWfCI6z80xFu9LTZmf1ZRjMHUOPmWr69U=
-github.com/momentohq/client-sdk-go v1.26.2 h1:hCIdju6jbeyEoF28tKPjgbCX4jgiurCJjQ8SxmWr1+E=
-github.com/momentohq/client-sdk-go v1.26.2/go.mod h1:CJ4RZ2ioq773eqfd1LtYERcGBfXOyyXSHITo5J0fGlw=
+github.com/momentohq/client-sdk-go v1.28.2 h1:N3eruyLiR80PYR1S2nKEwdRptlpFgnYcBui0VS7urIg=
+github.com/momentohq/client-sdk-go v1.28.2/go.mod h1:CJ4RZ2ioq773eqfd1LtYERcGBfXOyyXSHITo5J0fGlw=
 github.com/onsi/ginkgo/v2 v2.8.1 h1:xFTEVwOFa1D/Ty24Ws1npBWkDYEV9BqZrsDxVrVkrrU=
 github.com/onsi/ginkgo/v2 v2.8.1/go.mod h1:N1/NbDngAFcSLdyZ+/aYTYGSlq9qMCS/cNKGJjy+csc=
 github.com/onsi/gomega v1.26.0 h1:03cDLK28U6hWvCAns6NeydX3zIm4SF3ci69ulidS32Q=
