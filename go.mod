@@ -12,7 +12,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.35.0
 	github.com/aws/smithy-go v1.21.0
 	github.com/google/uuid v1.6.0
-	github.com/momentohq/client-sdk-go v1.26.2
+	github.com/momentohq/client-sdk-go v1.28.2
 )
 
 require (
