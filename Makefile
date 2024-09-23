@@ -1,7 +1,7 @@
 .PHONY: install-devtools
 install-devtools:
-	go install golang.org/x/tools/cmd/goimports@latest
-	go install honnef.co/go/tools/cmd/staticcheck@latest
+	go install golang.org/x/tools/cmd/goimports@v0.25.0
+	go install honnef.co/go/tools/cmd/staticcheck@v0.5.1
 	go install github.com/onsi/ginkgo/v2/ginkgo@v2.8.1
 
 .PHONY: format
@@ -29,8 +29,8 @@ lint: format imports tidy vet staticcheck
 
 .PHONY: install-protos-devtools
 install-protos-devtools:
-	go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.34.2
+	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
 
 .PHONY: build
 build:
