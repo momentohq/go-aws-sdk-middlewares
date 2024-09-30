@@ -1,14 +1,14 @@
 package caching
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"testing"
 	"time"
+
+	"github.com/momentohq/go-aws-sdk-middlewares/internal/serializer"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsConfig "github.com/aws/aws-sdk-go-v2/config"
@@ -37,18 +37,27 @@ type Movie struct {
 }
 
 var (
-	momentoClient  momento.CacheClient
-	ddbClient      *dynamodb.Client
-	tableInfo      TableBasics
-	tableName      string
-	movies         []Movie
-	movie1         Movie
-	movie2         Movie
-	movie1hash     string
-	movie2hash     string
-	movie1json2022 = "{\"info\":null,\"title\":\"A Movie Part 1\",\"year\":2022}"
-	movie2json2022 = "{\"info\":null,\"title\":\"A Movie Part 2\",\"year\":2022}"
-	writebackType  = SYNCHRONOUS
+	momentoClient momento.CacheClient
+	ddbClient     *dynamodb.Client
+	ddbSerializer Serializer
+	tableInfo     TableBasics
+	tableName     string
+	movies        []Movie
+	movie1        Movie
+	movie2        Movie
+	movie1hash    string
+	movie2hash    string
+	movie1Map     = map[string]types.AttributeValue{
+		"info":  &types.AttributeValueMemberNULL{Value: true},
+		"title": &types.AttributeValueMemberS{Value: "A Movie Part 1"},
+		"year":  &types.AttributeValueMemberN{Value: "2022"},
+	}
+	movie2Map = map[string]types.AttributeValue{
+		"info":  &types.AttributeValueMemberNULL{Value: true},
+		"title": &types.AttributeValueMemberS{Value: "A Movie Part 2"},
+		"year":  &types.AttributeValueMemberN{Value: "2022"},
+	}
+	writebackType = SYNCHRONOUS
 )
 
 func setupTest() func() {
@@ -77,7 +86,9 @@ func setupTest() func() {
 	// writebackType defaults to synchronous but can be modified before calling `setupTest()`
 	// you may also instantiate additional clients to test, passing different values for writebackType
 	// to `getDdbClientWithMiddleware()`
-	ddbClient = getDdbClientWithMiddleware(momentoClient, &writebackType)
+	ddbSerializer = serializer.JSONSerializer{}
+	d := getDdbClientWithMiddleware(momentoClient, &writebackType, ddbSerializer)
+	ddbClient = d
 
 	amazonConfig := mustGetAWSConfig()
 	ddbControlClient := dynamodb.NewFromConfig(amazonConfig)
@@ -104,11 +115,11 @@ func setupTest() func() {
 
 	movie1 = movies[0]
 	movie2 = movies[1]
-	movie1hash, err = ComputeCacheKey(tableName, movie1.getKey())
+	movie1hash, err = ComputeCacheKey(tableName, movie1.getKey(), ddbSerializer)
 	if err != nil {
 		panic(err)
 	}
-	movie2hash, err = ComputeCacheKey(tableName, movie2.getKey())
+	movie2hash, err = ComputeCacheKey(tableName, movie2.getKey(), ddbSerializer)
 	if err != nil {
 		panic(err)
 	}
@@ -151,6 +162,7 @@ func testGetItemCacheMissCommon(t *testing.T) (Movie, responses.GetResponse) {
 	if err != nil {
 		t.Errorf("error occured calling momento get: %+v", err)
 	}
+
 	return movie, getResp
 }
 
@@ -160,14 +172,14 @@ func TestGetItemCacheMiss(t *testing.T) {
 	movie, getResp := testGetItemCacheMissCommon(t)
 	switch r := getResp.(type) {
 	case *responses.GetHit:
-		movieInfo, err := getMapFromJsonBytes(r.ValueByte())
+		movieInfo, err := getMovieFromBytes(r)
 		if err != nil {
 			t.Errorf("error decoding cache hit: %+v", err)
 		}
-		if movieInfo["title"] != movie.Title {
+		if movieInfo.Title != movie.Title {
 			t.Errorf("expected cache hit title to match dynamodb response: %+v != %+v", movieInfo, movie)
 		}
-		if fmt.Sprint(movieInfo["year"]) != fmt.Sprint(movie.Year) {
+		if fmt.Sprint(movieInfo.Year) != fmt.Sprint(movie.Year) {
 			t.Errorf("expected cache hit year to match dynamodb response: %+v != %+v", movieInfo, movie)
 		}
 	case *responses.GetMiss:
@@ -199,10 +211,14 @@ func TestGetItemCacheHitAsync(t *testing.T) {
 func TestGetItemCacheHit(t *testing.T) {
 	defer setupTest()()
 
-	_, err := momentoClient.Set(context.Background(), &momento.SetRequest{
+	itemToCache, err := ddbSerializer.Serialize(movie1Map)
+	if err != nil {
+		t.Errorf("error serializing movie 1 map: %+v", err)
+	}
+	_, err = momentoClient.Set(context.Background(), &momento.SetRequest{
 		CacheName: tableName,
 		Key:       momento.String(movie1hash),
-		Value:     momento.Bytes(movie1json2022),
+		Value:     momento.Bytes(itemToCache),
 	})
 	if err != nil {
 		t.Errorf("error occured calling momento set: %+v", err)
@@ -231,7 +247,7 @@ func TestGetItemCacheHit(t *testing.T) {
 func TestGetItemError(t *testing.T) {
 	defer setupTest()()
 	mmc := &mockMomentoClient{}
-	ddbClient := getDdbClientWithMiddleware(mmc, nil)
+	ddbClient := getDdbClientWithMiddleware(mmc, nil, ddbSerializer)
 
 	// Execute GetItem Request as you would normally
 	resp, err := ddbClient.GetItem(context.TODO(), &dynamodb.GetItemInput{
@@ -256,16 +272,24 @@ func TestGetItemError(t *testing.T) {
 func TestBatchGetItemAllHits(t *testing.T) {
 	defer setupTest()()
 
-	_, err := momentoClient.SetBatch(context.Background(), &momento.SetBatchRequest{
+	item1ToCache, err := ddbSerializer.Serialize(movie1Map)
+	if err != nil {
+		t.Errorf("error serializing movie 1 map: %+v", err)
+	}
+	item2ToCache, err := ddbSerializer.Serialize(movie1Map)
+	if err != nil {
+		t.Errorf("error serializing movie 2 map: %+v", err)
+	}
+	_, err = momentoClient.SetBatch(context.Background(), &momento.SetBatchRequest{
 		CacheName: tableName,
 		Items: []momento.BatchSetItem{
 			{
 				Key:   momento.String(movie1hash),
-				Value: momento.Bytes(movie1json2022),
+				Value: momento.Bytes(item1ToCache),
 			},
 			{
 				Key:   momento.String(movie2hash),
-				Value: momento.Bytes(movie2json2022),
+				Value: momento.Bytes(item2ToCache),
 			},
 		},
 	})
@@ -359,11 +383,14 @@ func TestBatchGetItemAllMisses(t *testing.T) {
 		for _, element := range r.Results() {
 			switch e := element.(type) {
 			case *responses.GetHit:
-				movieInfo, err := getMapFromJsonBytes(e.ValueByte())
+				movieInfo, err := getMovieFromBytes(e)
 				if err != nil {
 					t.Errorf("error decoding cache hit: %+v", err)
 				}
-				if fmt.Sprint(movieInfo["year"]) != fmt.Sprint(2021) {
+				if err != nil {
+					t.Errorf("error decoding cache hit: %+v", err)
+				}
+				if fmt.Sprint(movieInfo.Year) != fmt.Sprint(2021) {
 					t.Errorf("expected cache hit year to match ddb response: %+v", movieInfo)
 				}
 			case *responses.GetMiss:
@@ -398,10 +425,14 @@ func TestBatchGetItemAllMissesNoWriteback(t *testing.T) {
 
 // batch get tests - mixed hits and misses
 func testBatchGetItemsMixedCommon(t *testing.T) responses.GetBatchResponse {
-	_, err := momentoClient.Set(context.Background(), &momento.SetRequest{
+	itemToCache, err := ddbSerializer.Serialize(movie1Map)
+	if err != nil {
+		t.Errorf("error serializing movie 1 map: %+v", err)
+	}
+	_, err = momentoClient.Set(context.Background(), &momento.SetRequest{
 		CacheName: tableName,
 		Key:       momento.String(movie1hash),
-		Value:     momento.Bytes(movie1json2022),
+		Value:     momento.Bytes(itemToCache),
 	})
 	if err != nil {
 		t.Errorf("error occured calling momento set: %+v", err)
@@ -463,14 +494,14 @@ func TestBatchGetItemsMixed(t *testing.T) {
 		for _, element := range r.Results() {
 			switch e := element.(type) {
 			case *responses.GetHit:
-				movieInfo, err := getMapFromJsonBytes(e.ValueByte())
+				movieInfo, err := getMovieFromBytes(e)
 				if err != nil {
 					t.Errorf("error decoding cache hit: %+v", err)
 				}
-				if movieInfo["title"] == "A Movie Part 1" && fmt.Sprint(movieInfo["year"]) != fmt.Sprint(2022) {
+				if movieInfo.Title == "A Movie Part 1" && fmt.Sprint(movieInfo.Year) != fmt.Sprint(2022) {
 					t.Errorf("expected cache hit year to match ddb response: %+v", movieInfo)
 				}
-				if movieInfo["title"] == "A Movie Part 2" && fmt.Sprint(movieInfo["year"]) != fmt.Sprint(2021) {
+				if movieInfo.Title == "A Movie Part 2" && fmt.Sprint(movieInfo.Year) != fmt.Sprint(2021) {
 					t.Errorf("expected ddb hit year: %+v", movieInfo)
 				}
 			case *responses.GetMiss:
@@ -494,11 +525,11 @@ func TestBatchGetItemsMixedNoWriteback(t *testing.T) {
 		for _, element := range r.Results() {
 			switch e := element.(type) {
 			case *responses.GetHit:
-				movieInfo, err := getMapFromJsonBytes(e.ValueByte())
+				movieInfo, err := getMovieFromBytes(e)
 				if err != nil {
 					t.Errorf("error decoding cache hit: %+v", err)
 				}
-				if movieInfo["title"] != "A Movie Part 1" {
+				if movieInfo.Title != "A Movie Part 1" {
 					t.Errorf("expected cache miss but got: %+v", movieInfo)
 				}
 			}
@@ -510,7 +541,7 @@ func TestBatchGetItemsMixedNoWriteback(t *testing.T) {
 func TestBatchGetItemsError(t *testing.T) {
 	defer setupTest()()
 	mmc := &mockMomentoClient{}
-	ddbClient := getDdbClientWithMiddleware(mmc, nil)
+	ddbClient := getDdbClientWithMiddleware(mmc, nil, ddbSerializer)
 
 	req := &dynamodb.BatchGetItemInput{
 		RequestItems: map[string]types.KeysAndAttributes{
@@ -578,13 +609,16 @@ func mustGetAWSConfig() aws.Config {
 	return cfg
 }
 
-func getMapFromJsonBytes(jsonBytes []byte) (map[string]interface{}, error) {
-	var myMap map[string]interface{}
-	err := json.NewDecoder(bytes.NewReader(jsonBytes)).Decode(&myMap)
+func getMovieFromBytes(r *responses.GetHit) (Movie, error) {
+	d, err := ddbSerializer.Deserialize(r.ValueByte())
 	if err != nil {
-		return nil, err
+		return Movie{}, err
 	}
-	return myMap, nil
+	movie, err := getMovieFromDdbItem(d)
+	if err != nil {
+		return Movie{}, err
+	}
+	return movie, nil
 }
 
 func getMovieFromDdbItem(item map[string]types.AttributeValue) (Movie, error) {
@@ -596,17 +630,19 @@ func getMovieFromDdbItem(item map[string]types.AttributeValue) (Movie, error) {
 	return movie, nil
 }
 
-func getDdbClientWithMiddleware(momentoClient momento.CacheClient, writebackType *WritebackType) *dynamodb.Client {
+func getDdbClientWithMiddleware(momentoClient momento.CacheClient, writebackType *WritebackType, s Serializer) *dynamodb.Client {
 	amazonConfiguration := mustGetAWSConfig()
 	var wb WritebackType
 	if writebackType != nil {
 		wb = *writebackType
 	}
+
 	AttachNewCachingMiddleware(MiddlewareProps{
-		&amazonConfiguration,
-		tableName,
-		momentoClient,
-		wb,
+		AwsConfig:     &amazonConfiguration,
+		CacheName:     tableName,
+		MomentoClient: momentoClient,
+		WritebackType: wb,
+		Serializer:    s,
 	})
 	return dynamodb.NewFromConfig(amazonConfiguration)
 }

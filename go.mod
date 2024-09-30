@@ -13,6 +13,7 @@ require (
 	github.com/aws/smithy-go v1.21.0
 	github.com/google/uuid v1.6.0
 	github.com/momentohq/client-sdk-go v1.28.2
+	github.com/vmihailenco/msgpack/v5 v5.4.1
 )
 
 require (
@@ -29,6 +30,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.31.0 // indirect
 	github.com/golang-jwt/jwt/v4 v4.3.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
+	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	golang.org/x/net v0.23.0 // indirect
 	golang.org/x/sys v0.18.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
