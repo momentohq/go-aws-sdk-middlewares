@@ -35,7 +35,7 @@ func BenchmarkSerialization(b *testing.B) {
 
 	for _, serializer := range serializers {
 		for _, payload := range testPayloads {
-			b.Run(serializer.name+"Marshal/"+payload.name, func(b *testing.B) {
+			b.Run(serializer.name+"Serialize/"+payload.name, func(b *testing.B) {
 				for i := 0; i < b.N; i++ {
 					_, err := serializer.serializer.Serialize(payload.item)
 					if err != nil {
@@ -44,7 +44,7 @@ func BenchmarkSerialization(b *testing.B) {
 				}
 			})
 
-			b.Run(serializer.name+"Unmarshal/"+payload.name, func(b *testing.B) {
+			b.Run(serializer.name+"Deserialize/"+payload.name, func(b *testing.B) {
 				data, err := serializer.serializer.Serialize(payload.item)
 				if err != nil {
 					b.Error(err)

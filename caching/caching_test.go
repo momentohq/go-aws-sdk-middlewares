@@ -276,7 +276,7 @@ func TestBatchGetItemAllHits(t *testing.T) {
 	if err != nil {
 		t.Errorf("error serializing movie 1 map: %+v", err)
 	}
-	item2ToCache, err := ddbSerializer.Serialize(movie1Map)
+	item2ToCache, err := ddbSerializer.Serialize(movie2Map)
 	if err != nil {
 		t.Errorf("error serializing movie 2 map: %+v", err)
 	}
